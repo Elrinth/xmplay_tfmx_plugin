@@ -24,8 +24,8 @@
 #endif
 
 #define PLUGIN_NAME    "TFMX"
-#define PLUGIN_VERSION "1.0.3"
-#define PLUGIN_XMPVER  1000300  /* 1*1000000+0*10000+3*100; must match FILEVERSION */
+#define PLUGIN_VERSION "1.0.4"
+#define PLUGIN_XMPVER  1000400  /* 1*1000000+0*10000+4*100; must match FILEVERSION */
 #define MAX_MODULE_BYTES ((size_t)16u * 1024u * 1024u)
 #define MAX_SMPL_BYTES   ((size_t)32u * 1024u * 1024u)
 #define INFO_WRITE_MAX   32766
@@ -304,19 +304,32 @@ static int sidecar_candidates(const char *path, char cands[][TFMX_PATH], int max
     snprintf(buf, sizeof buf, "%sSMPL.%s", dir, name + 5);
     add_cand(cands, &n, max, buf);
   }
+  /* Folder-shared sample set (after stem match so song.sam still wins). */
+  {
+    static const char *shared[] = {
+      "Set.sam", "set.sam", "SET.SAM",
+      "smpl.set", "SMPL.set", "smp.set",
+      NULL
+    };
+    int k;
+    for (k = 0; shared[k]; ++k) {
+      snprintf(buf, sizeof buf, "%s%s", dir, shared[k]);
+      add_cand(cands, &n, max, buf);
+    }
+  }
   (void)ieq;
   return n;
 }
 
 static int find_sidecar(const char *filename, unsigned char **out, size_t *out_len)
 {
-  char cands[16][TFMX_PATH];
+  char cands[32][TFMX_PATH];
   int n, i;
   *out = NULL;
   *out_len = 0;
   if (!filename || !xmpffile || !xmpffile->Open)
     return 0;
-  n = sidecar_candidates(filename, cands, 16);
+  n = sidecar_candidates(filename, cands, 32);
   for (i = 0; i < n; ++i) {
     XMPFILE f = xmpffile->Open(cands[i]);
     unsigned char *buf = NULL;
@@ -424,7 +437,8 @@ static void WINAPI tfmx_About(HWND win)
     "  - loop-end is not EOF — we play to the measured length\r\n"
     "  - one playlist item: all real song-table slots play as one length\r\n"
     "  - no fake NSF split / no Shift+arrow tracks\r\n"
-    "  - .tfx + .sam (also .tfm/.mdat/.tfmx + .smpl, mdat./smpl.)\r\n\r\n"
+    "  - .tfx + .sam (also .tfm/.mdat/.tfmx + .smpl, mdat./smpl.)\r\n"
+    "  - shared sample set: Set.sam / smpl.set / smp.set in the same folder\r\n\r\n"
     "Engine: libtfmxaudiodecoder by Michael Schwendt.\r\n"
     "Hülsbeck TFMX only — not Hippel / Future Composer .fc.\r\n"
     "32-bit XMPlay only (PE32 i386).\r\n"
@@ -464,12 +478,13 @@ static tfmx_player *open_from(const char *filename, unsigned char *data, size_t 
   size_t smpl_len = 0;
   tfmx_player *pl;
   const char *path = resolve_path(filename);
-  /* Real filename: library finds sibling .sam via set_path. Only slurp a
-   * sidecar for memory-only opens (no usable directory). */
-  if (!(path && path[0])) {
-    if (g_name_hint[0])
-      find_sidecar(g_name_hint, &smpl, &smpl_len);
-  }
+  /* Real-path set_path is still first (player_open) so the library can
+   * find Set.sam itself. Also slurp sidecar so stem.sam-missing folders
+   * (Set.sam / smpl.set) and memory-only opens still pass sample bytes. */
+  if (path && path[0])
+    find_sidecar(path, &smpl, &smpl_len);
+  else if (g_name_hint[0])
+    find_sidecar(g_name_hint, &smpl, &smpl_len);
   pl = tfmx_player_open(path, data, len, smpl, smpl_len);
   free(smpl);
   return pl;
@@ -501,10 +516,10 @@ static DWORD WINAPI tfmx_GetFileInfo(const char *filename, XMPFILE file,
 
   {
     const char *path = resolve_path(filename);
-    if (!(path && path[0])) {
-      if (g_name_hint[0])
-        find_sidecar(g_name_hint, &smpl, &smpl_len);
-    }
+    if (path && path[0])
+      find_sidecar(path, &smpl, &smpl_len);
+    else if (g_name_hint[0])
+      find_sidecar(g_name_hint, &smpl, &smpl_len);
     if (tfmx_analyze(path, data, len, smpl, smpl_len, &inf) != 0) {
       free(data);
       free(smpl);

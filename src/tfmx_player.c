@@ -534,12 +534,24 @@ tfmx_player *tfmx_player_open(const char *path,
   }
 
   if (!init_decoder(p->dec, use_path, mdat, mdat_len)) {
-    tfmxdec_delete(p->dec);
+    /* Real-path set_path is first. If that missed a shared Set.sam
+     * and the host already slurped those bytes, try a temp pair. */
+    if (path && path[0] && smpl && smpl_len && mdat && mdat_len && !p->temp_tfx[0]) {
+      make_temp_pair(p, mdat, mdat_len, smpl, smpl_len);
+      if (p->temp_tfx[0]) {
+        tfmxdec_delete(p->dec);
+        p->dec = tfmxdec_new();
+        if (p->dec && init_decoder(p->dec, p->temp_tfx, mdat, mdat_len))
+          goto opened;
+      }
+    }
+    if (p->dec)
+      tfmxdec_delete(p->dec);
     cleanup_temp(p);
     free(p);
     return NULL;
   }
-
+opened:
   snapshot_real_songs(p);
   p->slot_ready = switch_to_slot(p, 0, 0);
   p->voices = tfmxdec_voices(p->dec);
