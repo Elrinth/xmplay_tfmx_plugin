@@ -8,3 +8,8 @@ and must **not** be committed or uploaded.
 
 `/usr/bin/make test` requires `user-song.tfx` + sibling `.sam`.
 `user-mod.*` is used when present. Both are exposed as **one** playlist item.
+    tests/samples/kanzle/kanzle-a.tfx + kanzle-b.tfx + Set.sam
+        # two TFMX Professional songs sharing ONE sample file (no kanzle-a.sam)
+
+`kanzle/` is used when present. Opening either `.tfx` must find `Set.sam`
+in that folder (not `song.sam` / `smpl.set`). Never commit or upload these.
