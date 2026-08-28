@@ -146,6 +146,48 @@ static int test_user_song(void)
     g_fail++;
   }
 
+  /* 10s of intermittent nonzero PCM; song_end in first 500ms must not stop. */
+  {
+    float chunk[44100 / 50 * 2]; /* ~20ms */
+    int rate = tfmx_player_rate(p);
+    int want = 10 * rate;
+    int got = 0, heard = 0, early_end = 0;
+    int n, i, peak16;
+    tfmx_player_seek_ms(p, 0);
+    while (got < want) {
+      n = tfmx_player_process(p, chunk, (int)(sizeof chunk / sizeof chunk[0]));
+      if (n <= 0) {
+        if (tfmx_player_position_ms(p) < 500)
+          early_end = 1;
+        break;
+      }
+      peak16 = 0;
+      for (i = 0; i < n; ++i) {
+        float v = chunk[i];
+        int iv;
+        if (v < 0) v = -v;
+        iv = (int)(v * 32768.0f);
+        if (iv > peak16) peak16 = iv;
+      }
+      if (peak16 >= 24) heard += n / 2;
+      got += n / 2;
+    }
+    printf("render 10s: frames=%d heard=%d pos=%d ended=%d early_end=%d\n",
+           got, heard, tfmx_player_position_ms(p), tfmx_player_ended(p), early_end);
+    if (early_end) {
+      fprintf(stderr, "FAIL: song_end/process 0 in first 500ms\n");
+      g_fail++;
+    }
+    if (got < 8 * rate) {
+      fprintf(stderr, "FAIL: less than ~8s rendered (frames=%d)\n", got);
+      g_fail++;
+    }
+    if (heard < rate) { /* at least ~1s of audible samples across 10s */
+      fprintf(stderr, "FAIL: not enough intermittent audio in 10s (heard=%d)\n", heard);
+      g_fail++;
+    }
+  }
+
   seek_to = dur > 4000 ? dur / 2 : 1000;
   pos = tfmx_player_seek_ms(p, seek_to);
   printf("seek to %d -> %d\n", seek_to, pos);
@@ -187,4 +229,3 @@ int main(void)
   printf("OK\n");
   return 0;
 }
-
