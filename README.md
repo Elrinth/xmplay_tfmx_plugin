@@ -1,4 +1,4 @@
-# xmp-tfmx 1.0.1
+# xmp-tfmx 1.0.2
 
 Native **32-bit** XMPlay input plugin for Chris Hülsbeck **TFMX**
 (The Final Musicsystem eXtended).
@@ -20,7 +20,7 @@ Composer `.fc` (those conflict with other XMPlay plugins).
 
 Copy `xmp-tfmx.dll` next to `xmplay.exe` (or into XMPlay's plugin folder)
 and restart XMPlay. The DLL carries a Windows VERSIONINFO resource
-(FILEVERSION 1.0.1.0) so XMPlay can include it in update notifications.
+(FILEVERSION 1.0.2.0) so XMPlay can include it in update notifications.
 Classic XMPlay is **32-bit only** — this DLL is PE32 i386. A 64-bit build
 will not load.
 
@@ -43,17 +43,27 @@ merged single-file format (TFMXPAK / TFHD / TFMX-MOD).
 
 ## Length + seek
 
-- Playlist / file-info length comes from `tfmxdec_duration()` (milliseconds).
-- If the engine reports 0 or a one-note-short time, the plugin measures with
-  loop mode on until 2 seconds of silence, capped at **10 minutes**.
+- Playlist / file-info length comes from `tfmxdec_duration()` when that
+  matches heard audio (dry-run to the first loop / song-end).
+- If the engine reports 0 or a one-note-short time, the plugin measures
+  with loop mode on until 2 seconds of silence, capped at **10 minutes**.
 - Loop-end is not treated as EOF; we play to the measured length.
 - Playhead is seekable (`SetLength(seconds, TRUE)`, granularity 1 ms).
 - Playback uses loop mode so the first pattern loop does not stop the song.
 
 ## Multi-track
 
-Files with several songs become NSF-style **tracks**. Use **Shift+Left** /
+The TFMX song table often has 8 slots (one real tune plus SFX). This
+plugin **keeps only slots with sustained audio** (about 2 seconds of
+non-silence). One-note / empty / SFX slots are not NSF tracks.
+
+Remaining songs become NSF-style **tracks**. Use **Shift+Left** /
 **Shift+Right** in XMPlay (same as NSF / xmp-sc68 / xmp-pokey).
+If only one real song remains, the title is a single name — not
+`name - 1/8`.
+
+The displayed title is the module title when it is non-empty and not
+`(Empty)`; otherwise the original filename stem (never a temp `mod.tfx`).
 
 ## Why `in_tfmx.dll` rejects some `.tfx` files
 
@@ -83,7 +93,8 @@ Needs `g++` and `i686-w64-mingw32-g++` / `windres`. The DLL is linked
 `-static -static-libgcc -static-libstdc++`.
 
 Do not commit copyrighted `.tfx` / `.sam` rips. Host tests look for
-`tests/samples/user-song.tfx` + `.sam` locally.
+`tests/samples/user-song.tfx` + `.sam` (and `user-mod.tfx` + `.sam`
+when present) locally.
 
 ## Credits
 
