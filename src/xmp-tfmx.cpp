@@ -24,7 +24,7 @@
 #endif
 
 #define PLUGIN_NAME    "TFMX"
-#define PLUGIN_VERSION "1.0.1"
+#define PLUGIN_VERSION "1.0.2"
 #define PLUGIN_XMPVER  1000000
 #define MAX_MODULE_BYTES ((size_t)16u * 1024u * 1024u)
 #define MAX_SMPL_BYTES   ((size_t)32u * 1024u * 1024u)
@@ -424,9 +424,10 @@ static void WINAPI tfmx_About(HWND win)
     "text block / mdat+smpl names).\r\n\r\n"
     "This plugin:\r\n"
     "  - seekable playhead (tfmxdec_seek, 1 ms)\r\n"
-    "  - real song length (tfmxdec_duration; if 0 or one-note-short,\r\n"
-    "    measure with loop on until 2s silence / 10-minute cap)\r\n"
+    "  - real song length (library duration if it matches heard audio;\r\n"
+    "    else last audible sample + tail / 10-minute cap)\r\n"
     "  - loop-end is not EOF — we play to the measured length\r\n"
+    "  - SFX / one-note song-table slots are not NSF tracks\r\n"
     "  - .tfx + .sam (also .tfm/.mdat/.tfmx + .smpl, mdat./smpl.)\r\n"
     "  - NSF-style tracks (Shift+Left / Shift+Right)\r\n\r\n"
     "Engine: libtfmxaudiodecoder by Michael Schwendt.\r\n"

@@ -1,5 +1,9 @@
 /*
  * TFMX (Hülsbeck) player wrapper around libtfmxaudiodecoder.
+ *
+ * Exposes only real tunes (sustained audio). One-note / empty / SFX
+ * song-table slots are dropped. Temp files use the original filename
+ * stem (never a hardcoded "mod.tfx").
  */
 #include "tfmx_player.h"
 
@@ -8,17 +12,20 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <ctype.h>
 
 #ifdef _WIN32
 # include <windows.h>
 # include <direct.h>
 # include <io.h>
 # define MKDIR(p) _mkdir(p)
+# define PATH_SEP '\\'
 #else
 # include <unistd.h>
 # include <sys/stat.h>
 # include <sys/types.h>
 # define MKDIR(p) mkdir(p, 0700)
+# define PATH_SEP '/'
 #endif
 
 #include "tfmxaudiodecoder.h"
@@ -32,16 +39,19 @@
 struct tfmx_player {
   void *dec;
   int rate;
-  int songs;
-  int song;
+  int songs;                 /* exposed (real) count */
+  int song;                  /* exposed index */
+  int slot_of[TFMX_MAX_SONGS];
   int voices;
   int ended;
   int pos_ms;
   int duration_ms[TFMX_MAX_SONGS];
-  int samples_acc; /* leftover samples toward next ms */
+  int samples_acc;
   char title[TFMX_STR];
   char artist[TFMX_STR];
   char name[TFMX_STR];
+  char stem[TFMX_STR];       /* original filename stem (display + temp) */
+  char file_stem[64];        /* sanitized for temp filenames */
   char format_id[64];
   char format_name[128];
   char temp_dir[TFMX_PATH];
@@ -60,6 +70,70 @@ static void bounded_copy(char *dst, size_t cap, const char *src)
   if (n >= cap) n = cap - 1;
   memcpy(dst, src, n);
   dst[n] = '\0';
+}
+
+static int is_blank_title(const char *s)
+{
+  if (!s)
+    return 1;
+  while (*s == ' ' || *s == '\t')
+    s++;
+  if (!s[0])
+    return 1;
+  if (strncmp(s, "(Empty)", 7) == 0) {
+    const char *p = s + 7;
+    while (*p == ' ')
+      p++;
+    if (!*p)
+      return 1;
+  }
+  return 0;
+}
+
+static void path_stem(const char *path, char *out, size_t cap)
+{
+  const char *base;
+  const char *slash;
+  const char *bslash;
+  char tmp[TFMX_PATH];
+  char *dot;
+
+  if (!path || !path[0]) {
+    bounded_copy(out, cap, "tfmx");
+    return;
+  }
+  slash = strrchr(path, '/');
+  bslash = strrchr(path, '\\');
+  base = path;
+  if (slash && slash + 1 > base)
+    base = slash + 1;
+  if (bslash && bslash + 1 > base)
+    base = bslash + 1;
+  bounded_copy(tmp, sizeof tmp, base);
+  dot = strrchr(tmp, '.');
+  if (dot && dot != tmp)
+    *dot = '\0';
+  if (!tmp[0])
+    bounded_copy(out, cap, "tfmx");
+  else
+    bounded_copy(out, cap, tmp);
+}
+
+static void make_file_stem(const char *stem, char *out, size_t cap)
+{
+  size_t i, j = 0;
+  if (!stem)
+    stem = "";
+  for (i = 0; stem[i] && j + 1 < cap && j + 1 < 64; ++i) {
+    unsigned char c = (unsigned char)stem[i];
+    if (isalnum(c) || c == '.' || c == '_' || c == '-')
+      out[j++] = (char)c;
+    else if (c == ' ' || c == '+')
+      out[j++] = '_';
+  }
+  out[j] = '\0';
+  if (!out[0] || strcmp(out, ".") == 0 || strcmp(out, "..") == 0)
+    bounded_copy(out, cap, "tfmx");
 }
 
 static int is_huelsbeck(void *dec)
@@ -117,15 +191,14 @@ static int pcm_peak16(const int16_t *s, int nsamp)
   return peak;
 }
 
-/* Library duration is 0 or one-note-short. Render with loop_mode=1
- * until 2s of silence (cap 10 min). Do NOT treat the first loop /
- * song_end flag as EOF — many TFMX songs signal that after pattern 1. */
-static int measure_if_zero(void *dec)
+/* Render with loop_mode=1 until 2s of silence (cap 10 min). */
+static int measure_until_silence(void *dec)
 {
   unsigned char buf[4096];
   int total_ms = 0;
   int silent_ms = 0;
   int heard = 0;
+  int last_peak = -1;
   int frames, chunk_ms, peak;
 
   apply_mixer(dec);
@@ -143,13 +216,13 @@ static int measure_if_zero(void *dec)
     if (peak >= 24) {
       heard = 1;
       silent_ms = 0;
+      last_peak = total_ms;
     } else {
       silent_ms += chunk_ms;
     }
     total_ms += chunk_ms;
-    /* song_end after the first loop is not EOF when looping is on. */
     if (heard && silent_ms >= TFMX_SILENCE_MS) {
-      total_ms -= silent_ms;
+      total_ms = last_peak + TFMX_TAIL_MS;
       if (total_ms < 1) total_ms = 1;
       break;
     }
@@ -161,30 +234,90 @@ static int measure_if_zero(void *dec)
   return total_ms;
 }
 
-static int song_duration(void *dec)
+/*
+ * Classify one decoder slot and pick a play length.
+ * Real tune: last peak>=24 at least ~2s after first, or heard_ms >= 2s.
+ * SFX / one-note / empty: dropped (real=0).
+ */
+static void classify_slot(void *dec, int *real, int *duration_ms,
+                          int *first_peak, int *last_peak, int *heard_ms)
 {
-  uint32_t d = tfmxdec_duration(dec);
-  /* 0 or one-note-short: ignore and measure with loop_mode=1. */
-  if (d >= (uint32_t)TFMX_TINY_MS)
-    return (int)d;
-  return measure_if_zero(dec);
+  unsigned char buf[4096];
+  int total_ms = 0;
+  int lib_dur;
+  int frames, chunk_ms, peak;
+  int fp = -1, lp = -1, heard = 0;
+
+  *real = 0;
+  *duration_ms = 0;
+  *first_peak = -1;
+  *last_peak = -1;
+  *heard_ms = 0;
+
+  apply_mixer(dec);
+  tfmxdec_set_loop_mode(dec, 1);
+  lib_dur = (int)tfmxdec_duration(dec);
+
+  while (total_ms < TFMX_CLASSIFY_MS) {
+    memset(buf, 0, sizeof buf);
+    tfmxdec_buffer_fill(dec, buf, (uint32_t)sizeof buf);
+    frames = (int)(sizeof buf / 4);
+    chunk_ms = (frames * 1000) / TFMX_RATE;
+    if (chunk_ms < 1) chunk_ms = 1;
+    peak = pcm_peak16((const int16_t *)buf, frames * 2);
+    if (peak >= 24) {
+      if (fp < 0) fp = total_ms;
+      lp = total_ms;
+      heard += chunk_ms;
+    }
+    total_ms += chunk_ms;
+  }
+
+  *first_peak = fp;
+  *last_peak = lp;
+  *heard_ms = heard;
+
+  {
+    int sustain = (fp >= 0 && lp >= 0) ? (lp - fp) : 0;
+    if (!((fp >= 0 && sustain >= TFMX_SUSTAIN_MS) || heard >= TFMX_HEARD_MIN_MS))
+      return; /* SFX / empty */
+  }
+  *real = 1;
+
+  /* Library duration is a dry-run to first song_end (one loop). Trust it
+   * when it is not one-note-short and we already heard sustained audio. */
+  if (lib_dur >= TFMX_TINY_MS)
+    *duration_ms = lib_dur;
+  else
+    *duration_ms = measure_until_silence(dec);
 }
 
-static void fill_meta(void *dec, char *title, char *artist, char *name,
-                      char *fid, char *fname)
+static void apply_display_names(tfmx_player *p)
 {
   const char *t, *a, *n, *id, *fn;
-  t = tfmxdec_get_title(dec);
-  a = tfmxdec_get_artist(dec);
-  n = tfmxdec_get_name(dec);
-  id = tfmxdec_format_id(dec);
-  fn = tfmxdec_format_name(dec);
-  if (!t || !t[0]) t = n;
-  bounded_copy(title, TFMX_STR, t);
-  bounded_copy(artist, TFMX_STR, a);
-  bounded_copy(name, TFMX_STR, n);
-  bounded_copy(fid, 64, id);
-  bounded_copy(fname, 128, fn);
+  if (!p || !p->dec)
+    return;
+  t = tfmxdec_get_title(p->dec);
+  a = tfmxdec_get_artist(p->dec);
+  n = tfmxdec_get_name(p->dec);
+  id = tfmxdec_format_id(p->dec);
+  fn = tfmxdec_format_name(p->dec);
+  bounded_copy(p->artist, sizeof p->artist, a);
+  bounded_copy(p->format_id, sizeof p->format_id, id);
+  bounded_copy(p->format_name, sizeof p->format_name, fn);
+
+  /* Name is the original stem, never the temp basename ("mod"). */
+  if (p->stem[0])
+    bounded_copy(p->name, sizeof p->name, p->stem);
+  else if (n && n[0] && strcmp(n, "mod") != 0)
+    bounded_copy(p->name, sizeof p->name, n);
+  else
+    bounded_copy(p->name, sizeof p->name, "tfmx");
+
+  if (!is_blank_title(t))
+    bounded_copy(p->title, sizeof p->title, t);
+  else
+    bounded_copy(p->title, sizeof p->title, p->name);
 }
 
 static int write_file(const char *path, const unsigned char *data, size_t len)
@@ -203,6 +336,7 @@ static void make_temp_pair(tfmx_player *p,
                            const unsigned char *mdat, size_t mdat_len,
                            const unsigned char *smpl, size_t smpl_len)
 {
+  const char *stem = p->file_stem[0] ? p->file_stem : "tfmx";
 #ifdef _WIN32
   char base[MAX_PATH];
   DWORD n;
@@ -214,8 +348,8 @@ static void make_temp_pair(tfmx_player *p,
   snprintf(p->temp_dir, sizeof p->temp_dir, "/tmp/xmp-tfmx-%d", (int)getpid());
 #endif
   MKDIR(p->temp_dir);
-  snprintf(p->temp_tfx, sizeof p->temp_tfx, "%s/mod.tfx", p->temp_dir);
-  snprintf(p->temp_sam, sizeof p->temp_sam, "%s/mod.sam", p->temp_dir);
+  snprintf(p->temp_tfx, sizeof p->temp_tfx, "%s%c%s.tfx", p->temp_dir, PATH_SEP, stem);
+  snprintf(p->temp_sam, sizeof p->temp_sam, "%s%c%s.sam", p->temp_dir, PATH_SEP, stem);
   if (!write_file(p->temp_tfx, mdat, mdat_len)) {
     p->temp_dir[0] = '\0';
     return;
@@ -262,28 +396,52 @@ static int init_decoder(void *dec, const char *path,
   return 1;
 }
 
-static void snapshot_durations(void *dec, int *out, int *nsongs)
+/* Keep only slots with sustained audio. Map exposed index -> decoder slot. */
+static void snapshot_real_songs(tfmx_player *p)
 {
-  int n, i, cur;
-  n = tfmxdec_songs(dec);
+  int n, i, exposed = 0;
+  int cur = 0;
+
+  n = tfmxdec_songs(p->dec);
   if (n < 1) n = 1;
   if (n > TFMX_MAX_SONGS) n = TFMX_MAX_SONGS;
-  *nsongs = n;
-  cur = 0;
+
   for (i = 0; i < n; ++i) {
+    int real = 0, dur = 0, fp = 0, lp = 0, heard = 0;
     if (i != cur) {
-      if (!tfmxdec_reinit(dec, i)) {
-        out[i] = 0;
+      if (!tfmxdec_reinit(p->dec, i))
         continue;
-      }
-      apply_mixer(dec);
+      apply_mixer(p->dec);
       cur = i;
     }
-    out[i] = song_duration(dec);
+    classify_slot(p->dec, &real, &dur, &fp, &lp, &heard);
+    cur = i; /* classify may reinit current */
+    if (!real || dur < 1)
+      continue;
+    p->slot_of[exposed] = i;
+    p->duration_ms[exposed] = dur;
+    exposed++;
   }
-  if (cur != 0) {
-    tfmxdec_reinit(dec, 0);
-    apply_mixer(dec);
+
+  if (exposed == 0) {
+    /* Last resort: still expose decoder song 0 so Open does not fail. */
+    if (cur != 0) {
+      tfmxdec_reinit(p->dec, 0);
+      apply_mixer(p->dec);
+    }
+    p->slot_of[0] = 0;
+    p->duration_ms[0] = (int)tfmxdec_duration(p->dec);
+    if (p->duration_ms[0] < TFMX_TINY_MS)
+      p->duration_ms[0] = measure_until_silence(p->dec);
+    if (p->duration_ms[0] < 1)
+      p->duration_ms[0] = 1;
+    exposed = 1;
+  }
+
+  p->songs = exposed;
+  if (p->slot_of[0] != cur) {
+    tfmxdec_reinit(p->dec, p->slot_of[0]);
+    apply_mixer(p->dec);
   }
 }
 
@@ -293,12 +451,14 @@ tfmx_player *tfmx_player_open(const char *path,
 {
   tfmx_player *p;
   const char *use_path = path;
-  int i;
 
   p = (tfmx_player *)calloc(1, sizeof *p);
   if (!p)
     return NULL;
   p->rate = TFMX_RATE;
+  path_stem(path, p->stem, sizeof p->stem);
+  make_file_stem(p->stem, p->file_stem, sizeof p->file_stem);
+
   p->dec = tfmxdec_new();
   if (!p->dec) {
     free(p);
@@ -312,7 +472,6 @@ tfmx_player *tfmx_player_open(const char *path,
   }
 
   if (!init_decoder(p->dec, use_path, mdat, mdat_len)) {
-    /* last resort: temp tfx only (library finds sibling .sam) */
     if (use_path != path && path && path[0]) {
       if (init_decoder(p->dec, path, mdat, mdat_len))
         goto ok;
@@ -324,17 +483,14 @@ tfmx_player *tfmx_player_open(const char *path,
   }
 
 ok:
-  snapshot_durations(p->dec, p->duration_ms, &p->songs);
-  tfmxdec_reinit(p->dec, 0);
+  snapshot_real_songs(p);
+  tfmxdec_reinit(p->dec, p->slot_of[0]);
   apply_mixer(p->dec);
   p->song = 0;
   p->voices = tfmxdec_voices(p->dec);
   p->ended = 0;
   p->pos_ms = 0;
-  fill_meta(p->dec, p->title, p->artist, p->name, p->format_id, p->format_name);
-  if (!p->title[0] && p->name[0])
-    bounded_copy(p->title, sizeof p->title, p->name);
-  (void)i;
+  apply_display_names(p);
   return p;
 }
 
@@ -374,19 +530,20 @@ int tfmx_player_total_duration_ms(const tfmx_player *p)
 
 int tfmx_player_set_song(tfmx_player *p, int song0)
 {
+  int slot;
   if (!p || !p->dec)
     return -1;
   if (song0 < 0 || song0 >= p->songs)
     return -1;
-  if (!tfmxdec_reinit(p->dec, song0))
+  slot = p->slot_of[song0];
+  if (!tfmxdec_reinit(p->dec, slot))
     return -1;
   apply_mixer(p->dec);
   p->song = song0;
   p->ended = 0;
   p->pos_ms = 0;
   p->samples_acc = 0;
-  p->duration_ms[song0] = song_duration(p->dec);
-  fill_meta(p->dec, p->title, p->artist, p->name, p->format_id, p->format_name);
+  apply_display_names(p);
   return 0;
 }
 
@@ -430,16 +587,13 @@ int tfmx_player_process(tfmx_player *p, float *stereo, int count)
 
   p->samples_acc += frames;
   while (p->samples_acc >= p->rate / 1000 && p->rate >= 1000) {
-    /* accumulate whole milliseconds */
     int step = p->rate / 1000;
     int nms = p->samples_acc / step;
     p->pos_ms += nms;
     p->samples_acc -= nms * step;
   }
-  /* leftover-safe: also bump from frames if rate not divisible — keep simple */
   cap = p->duration_ms[p->song];
-  /* Do not treat song_end as EOF while the measured duration is longer.
-   * Loop-mode is on, so the first pattern loop must not stop XMPlay. */
+  /* Loop-end (song_end) is not EOF while a measured length remains. */
   if (cap > 0) {
     if (p->pos_ms >= cap)
       p->ended = 1;

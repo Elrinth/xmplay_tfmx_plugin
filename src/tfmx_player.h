@@ -19,6 +19,10 @@ extern "C" {
 #define TFMX_DETECT_CAP_MS (10 * 60 * 1000)
 #define TFMX_SILENCE_MS    2000
 #define TFMX_TINY_MS       500   /* ignore one-note / bogus duration */
+#define TFMX_CLASSIFY_MS   3500  /* render window to tell tune from SFX */
+#define TFMX_SUSTAIN_MS    2000  /* last peak must be this far after first */
+#define TFMX_HEARD_MIN_MS  2000
+#define TFMX_TAIL_MS       250
 
 typedef struct tfmx_info {
   int  songs;
@@ -50,7 +54,7 @@ tfmx_player *tfmx_player_open(const char *path,
 void         tfmx_player_close(tfmx_player *p);
 
 int    tfmx_player_songs(const tfmx_player *p);
-int    tfmx_player_song(const tfmx_player *p); /* 0-based */
+int    tfmx_player_song(const tfmx_player *p); /* 0-based exposed index */
 int    tfmx_player_set_song(tfmx_player *p, int song0);
 int    tfmx_player_rate(const tfmx_player *p);
 int    tfmx_player_voices(const tfmx_player *p);
