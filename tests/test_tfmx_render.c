@@ -1,5 +1,5 @@
 /*
- * Host-side detect / open / duration / render / seek tests for xmp-tfmx 1.0.4.
+ * Host-side detect / open / duration / render / seek tests for xmp-tfmx 1.0.5.
  * A file is one playlist item. Process must not return 0 before the cap.
  */
 #include "tfmx_player.h"
@@ -453,11 +453,184 @@ static int test_kanzle(void)
   return 0;
 }
 
+
+static int test_longnoise(void)
+{
+  const char *tfx = "tests/samples/longnoise/long.tfx";
+  const char *sam = "tests/samples/longnoise/long.sam";
+  unsigned char *mdat, *smpl;
+  size_t mlen, slen;
+  tfmx_player *p;
+  tfmx_info inf;
+  double rms, peak;
+  int dur, frames, pos, ret0, n;
+  float chunk[576 * 2];
+  const int expect_ms = 226860; /* slots 0-11 trusted one-loop sum */
+
+  printf("==== long.tfx (no leftover SFX chain) ====\n");
+  mdat = slurp(tfx, &mlen);
+  if (!mdat) {
+    printf("SKIP: no %s\n", tfx);
+    return 0;
+  }
+  smpl = slurp(sam, &slen);
+  if (!smpl) {
+    printf("SKIP: no %s\n", sam);
+    free(mdat);
+    return 0;
+  }
+  printf("mdat bytes: %zu  sam bytes: %zu  probe=%d\n",
+         mlen, slen, tfmx_probe(mdat, mlen));
+
+  if (tfmx_analyze(tfx, mdat, mlen, smpl, slen, &inf) != 0) {
+    fprintf(stderr, "FAIL: analyze long.tfx\n");
+    g_fail++;
+    free(mdat);
+    free(smpl);
+    return -1;
+  }
+  printf("GetFileInfo equiv: n=%d duration0=%d (%d:%02d) title='%s'\n",
+         inf.songs, inf.duration_ms[0],
+         inf.duration_ms[0] / 60000, (inf.duration_ms[0] / 1000) % 60,
+         inf.title);
+  if (inf.songs != 1) {
+    fprintf(stderr, "FAIL: long.tfx GetFileInfo n=%d want 1\n", inf.songs);
+    g_fail++;
+  }
+  if (inf.duration_ms[0] < expect_ms - 2000 || inf.duration_ms[0] > expect_ms + 2000) {
+    fprintf(stderr, "FAIL: long.tfx duration %d want ~%d (3:46), not 45:05\n",
+            inf.duration_ms[0], expect_ms);
+    g_fail++;
+  }
+  if (inf.duration_ms[0] > 300000) {
+    fprintf(stderr, "FAIL: long.tfx still chaining junk (%d ms)\n", inf.duration_ms[0]);
+    g_fail++;
+  }
+
+  p = tfmx_player_open(tfx, mdat, mlen, smpl, slen);
+  if (!p) {
+    fprintf(stderr, "FAIL: open long.tfx\n");
+    g_fail++;
+    free(mdat);
+    free(smpl);
+    return -1;
+  }
+  dur = tfmx_player_duration_ms(p, 0);
+  printf("open: songs=%d duration_ms=%d (%d:%02d)\n",
+         tfmx_player_songs(p), dur, dur / 60000, (dur / 1000) % 60);
+  if (tfmx_player_songs(p) != 1) {
+    fprintf(stderr, "FAIL: long.tfx songs=%d want 1\n", tfmx_player_songs(p));
+    g_fail++;
+  }
+  if (dur < expect_ms - 2000 || dur > expect_ms + 2000) {
+    fprintf(stderr, "FAIL: long.tfx duration_ms=%d want ~%d\n", dur, expect_ms);
+    g_fail++;
+  }
+
+  /* 3:40 is still music (inside the last trusted slot). */
+  pos = tfmx_player_seek_ms(p, 220000);
+  printf("seek 3:40 -> %d\n", pos);
+  frames = render_sec(p, 2.0, &rms, &peak);
+  printf("  at 3:40: frames=%d rms=%.6f peak=%.6f pos=%d ended=%d\n",
+         frames, rms, peak, tfmx_player_position_ms(p), tfmx_player_ended(p));
+  if (frames < 200 || rms < 1e-6) {
+    fprintf(stderr, "FAIL: silent at 3:40 (rms=%g)\n", rms);
+    g_fail++;
+  }
+  if (tfmx_player_ended(p)) {
+    fprintf(stderr, "FAIL: ended at 3:40 (before advertised %d)\n", dur);
+    g_fail++;
+  }
+
+  /* Process must hit EOF by ~3:50, not keep playing the noise region. */
+  tfmx_player_seek_ms(p, dur > 4000 ? dur - 4000 : 0);
+  ret0 = 0;
+  frames = 0;
+  while (frames < 12 * 44100) {
+    n = tfmx_player_process(p, chunk, (int)(sizeof chunk / sizeof chunk[0]));
+    if (n <= 0) {
+      ret0 = 1;
+      break;
+    }
+    frames += n / 2;
+  }
+  printf("  near-end: frames=%d pos=%d ended=%d ret0=%d cap=%d\n",
+         frames, tfmx_player_position_ms(p), tfmx_player_ended(p), ret0, dur);
+  if (!ret0) {
+    fprintf(stderr, "FAIL: Process did not return 0 by ~3:50 (pos=%d cap=%d)\n",
+            tfmx_player_position_ms(p), dur);
+    g_fail++;
+  }
+  if (tfmx_player_position_ms(p) < dur - 200) {
+    fprintf(stderr, "FAIL: Process ended early (pos=%d cap=%d)\n",
+            tfmx_player_position_ms(p), dur);
+    g_fail++;
+  }
+  if (tfmx_player_position_ms(p) > dur + 2000) {
+    fprintf(stderr, "FAIL: played into noise past cap (pos=%d cap=%d)\n",
+            tfmx_player_position_ms(p), dur);
+    g_fail++;
+  }
+
+  /* Past the advertised length: already ended, Process returns 0. */
+  pos = tfmx_player_seek_ms(p, 230000);
+  n = tfmx_player_process(p, chunk, (int)(sizeof chunk / sizeof chunk[0]));
+  printf("  seek 3:50 -> %d process=%d ended=%d\n", pos, n, tfmx_player_ended(p));
+  if (n != 0 || !tfmx_player_ended(p)) {
+    fprintf(stderr, "FAIL: 3:50 must be ended (n=%d ended=%d)\n", n, tfmx_player_ended(p));
+    g_fail++;
+  }
+
+  tfmx_player_close(p);
+  free(mdat);
+  free(smpl);
+  return 0;
+}
+
+static int test_tiny(void)
+{
+  const char *tfx = "tests/samples/tiny/tiny.tfx";
+  const char *sam = "tests/samples/tiny/tiny.sam";
+  unsigned char *mdat, *smpl;
+  size_t mlen, slen;
+  tfmx_info inf;
+
+  printf("==== tiny.tfx (lone sample-loop, 10 min cap) ====\n");
+  mdat = slurp(tfx, &mlen);
+  if (!mdat) {
+    printf("SKIP: no %s\n", tfx);
+    return 0;
+  }
+  smpl = slurp(sam, &slen);
+  if (tfmx_analyze(tfx, mdat, mlen, smpl, slen, &inf) != 0) {
+    fprintf(stderr, "FAIL: analyze tiny.tfx\n");
+    g_fail++;
+    free(mdat);
+    free(smpl);
+    return -1;
+  }
+  printf("GetFileInfo equiv: n=%d duration0=%d\n", inf.songs, inf.duration_ms[0]);
+  if (inf.songs != 1) {
+    fprintf(stderr, "FAIL: tiny songs=%d want 1\n", inf.songs);
+    g_fail++;
+  }
+  /* Lone slot with no song-end keeps the 10-minute detect-cap. */
+  if (inf.duration_ms[0] < 9 * 60 * 1000 || inf.duration_ms[0] > TFMX_DETECT_CAP_MS + 2000) {
+    fprintf(stderr, "FAIL: tiny duration %d want ~10 min cap\n", inf.duration_ms[0]);
+    g_fail++;
+  }
+  free(mdat);
+  free(smpl);
+  return 0;
+}
+
 int main(void)
 {
   test_user_song();
   test_user_mod();
   test_kanzle();
+  test_longnoise();
+  test_tiny();
   if (g_fail) {
     fprintf(stderr, "FAILED %d check(s)\n", g_fail);
     return 1;
