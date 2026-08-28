@@ -24,8 +24,8 @@
 #endif
 
 #define PLUGIN_NAME    "TFMX"
-#define PLUGIN_VERSION "1.0.2"
-#define PLUGIN_XMPVER  1000000
+#define PLUGIN_VERSION "1.0.3"
+#define PLUGIN_XMPVER  1000300  /* 1*1000000+0*10000+3*100; must match FILEVERSION */
 #define MAX_MODULE_BYTES ((size_t)16u * 1024u * 1024u)
 #define MAX_SMPL_BYTES   ((size_t)32u * 1024u * 1024u)
 #define INFO_WRITE_MAX   32766
@@ -377,10 +377,8 @@ static char *build_tags_info(const tfmx_info *inf, int track0)
   append_tag(&p, end, "filetype", "TFMX");
   append_tag(&p, end, "title", inf->title[0] ? inf->title : inf->name);
   append_tag(&p, end, "artist", inf->artist);
-  if (inf->songs > 1) {
-    snprintf(trk, sizeof trk, "%d", track0 + 1);
-    append_tag(&p, end, "track", trk);
-  }
+  (void)trk;
+  (void)track0;
   return finish_tags(stack, p, sizeof stack);
 }
 
@@ -394,10 +392,7 @@ static char *build_tags_play(tfmx_player *pl)
   append_tag(&p, end, "filetype", "TFMX");
   append_tag(&p, end, "title", tfmx_player_title(pl)[0] ? tfmx_player_title(pl) : tfmx_player_name(pl));
   append_tag(&p, end, "artist", tfmx_player_artist(pl));
-  if (tfmx_player_songs(pl) > 1) {
-    snprintf(trk, sizeof trk, "%d", tfmx_player_song(pl) + 1);
-    append_tag(&p, end, "track", trk);
-  }
+  (void)trk;
   return finish_tags(stack, p, sizeof stack);
 }
 
@@ -427,9 +422,9 @@ static void WINAPI tfmx_About(HWND win)
     "  - real song length (library duration if it matches heard audio;\r\n"
     "    else last audible sample + tail / 10-minute cap)\r\n"
     "  - loop-end is not EOF — we play to the measured length\r\n"
-    "  - SFX / one-note song-table slots are not NSF tracks\r\n"
-    "  - .tfx + .sam (also .tfm/.mdat/.tfmx + .smpl, mdat./smpl.)\r\n"
-    "  - NSF-style tracks (Shift+Left / Shift+Right)\r\n\r\n"
+    "  - one playlist item: all real song-table slots play as one length\r\n"
+    "  - no fake NSF split / no Shift+arrow tracks\r\n"
+    "  - .tfx + .sam (also .tfm/.mdat/.tfmx + .smpl, mdat./smpl.)\r\n\r\n"
     "Engine: libtfmxaudiodecoder by Michael Schwendt.\r\n"
     "Hülsbeck TFMX only — not Hippel / Future Composer .fc.\r\n"
     "32-bit XMPlay only (PE32 i386).\r\n"
@@ -469,11 +464,12 @@ static tfmx_player *open_from(const char *filename, unsigned char *data, size_t 
   size_t smpl_len = 0;
   tfmx_player *pl;
   const char *path = resolve_path(filename);
-  /* Always try stem.sam / stem.smpl / smpl.stem / SMPL.stem via XMPlay. */
-  if (path && path[0])
-    find_sidecar(path, &smpl, &smpl_len);
-  if (!smpl && g_name_hint[0] && (!path || strcmp(path, g_name_hint) != 0))
-    find_sidecar(g_name_hint, &smpl, &smpl_len);
+  /* Real filename: library finds sibling .sam via set_path. Only slurp a
+   * sidecar for memory-only opens (no usable directory). */
+  if (!(path && path[0])) {
+    if (g_name_hint[0])
+      find_sidecar(g_name_hint, &smpl, &smpl_len);
+  }
   pl = tfmx_player_open(path, data, len, smpl, smpl_len);
   free(smpl);
   return pl;
@@ -488,7 +484,7 @@ static DWORD WINAPI tfmx_GetFileInfo(const char *filename, XMPFILE file,
   tfmx_info inf;
   unsigned char *smpl = NULL;
   size_t smpl_len = 0;
-  int n, i;
+  int n;
 
   if (length) *length = NULL;
   if (tags) *tags = NULL;
@@ -505,9 +501,10 @@ static DWORD WINAPI tfmx_GetFileInfo(const char *filename, XMPFILE file,
 
   {
     const char *path = resolve_path(filename);
-    find_sidecar(path, &smpl, &smpl_len);
-    if (!smpl && g_name_hint[0] && (!path || strcmp(path, g_name_hint) != 0))
-      find_sidecar(g_name_hint, &smpl, &smpl_len);
+    if (!(path && path[0])) {
+      if (g_name_hint[0])
+        find_sidecar(g_name_hint, &smpl, &smpl_len);
+    }
     if (tfmx_analyze(path, data, len, smpl, smpl_len, &inf) != 0) {
       free(data);
       free(smpl);
@@ -517,18 +514,25 @@ static DWORD WINAPI tfmx_GetFileInfo(const char *filename, XMPFILE file,
   free(data);
   free(smpl);
 
-  n = inf.songs > 0 ? inf.songs : 1;
+  /* One playlist item. Length is the chained sum of real table slots. */
+  n = 1;
+  (void)n;
   if (length) {
-    float *lens = (float *)xmp_alloc((DWORD)(sizeof(float) * (unsigned)n));
-    if (lens) {
-      for (i = 0; i < n; ++i)
-        lens[i] = (float)inf.duration_ms[i] / 1000.0f;
+    float *lens = (float *)xmp_alloc((DWORD)sizeof(float));
+    int ms = inf.duration_ms[0];
+    if (ms < 1) {
+      int k;
+      ms = 0;
+      for (k = 0; k < inf.songs && k < TFMX_MAX_SONGS; ++k)
+        ms += inf.duration_ms[k];
     }
+    if (lens)
+      lens[0] = (float)ms / 1000.0f;
     *length = lens;
   }
   if (tags)
     *tags = build_tags_info(&inf, 0);
-  return (DWORD)n | XMPIN_INFO_NOSUBTAGS;
+  return (DWORD)1 | XMPIN_INFO_NOSUBTAGS;
 }
 
 static DWORD WINAPI tfmx_Open(const char *filename, XMPFILE file)
@@ -553,7 +557,7 @@ static DWORD WINAPI tfmx_Open(const char *filename, XMPFILE file)
   free(data);
   if (!g_play)
     return 0;
-  set_length_now(tfmx_player_duration_ms(g_play, tfmx_player_song(g_play)));
+  set_length_now(tfmx_player_duration_ms(g_play, 0));
   return 2; /* stereo */
 }
 
@@ -600,14 +604,10 @@ static void WINAPI tfmx_GetInfoText(char *format, char *length)
     bounded_copy(format, 256, tmp);
   }
   if (length) {
-    play = tfmx_player_duration_ms(g_play, tfmx_player_song(g_play));
+    play = tfmx_player_duration_ms(g_play, 0);
     m = play / 60000;
     s = (play / 1000) % 60;
-    if (tfmx_player_songs(g_play) > 1)
-      snprintf(tmp, sizeof tmp, "%d:%02d  track %d/%d",
-               m, s, tfmx_player_song(g_play) + 1, tfmx_player_songs(g_play));
-    else
-      snprintf(tmp, sizeof tmp, "%d:%02d", m, s);
+    snprintf(tmp, sizeof tmp, "%d:%02d", m, s);
     sanitize_line(tmp);
     bounded_copy(length, 256, tmp);
   }
@@ -631,12 +631,6 @@ static void WINAPI tfmx_GetGeneralInfo(char *buf)
   write_kv(&p, end, "Format ID", tfmx_player_format_id(g_play));
   snprintf(num, sizeof num, "%d", tfmx_player_voices(g_play));
   write_kv(&p, end, "Voices", num);
-  if (tfmx_player_songs(g_play) > 1) {
-    snprintf(num, sizeof num, "%d", tfmx_player_songs(g_play));
-    write_kv(&p, end, "Tracks", num);
-    snprintf(num, sizeof num, "%d", tfmx_player_song(g_play) + 1);
-    write_kv(&p, end, "Current track", num);
-  }
   write_kv(&p, end, "Player", PLUGIN_NAME " " PLUGIN_VERSION);
   write_kv(&p, end, "Engine", "libtfmxaudiodecoder (Michael Schwendt)");
   write_kv(&p, end, "Note", "Native XMPlay TFMX — not in_tfmx.dll");
@@ -666,10 +660,13 @@ static double WINAPI tfmx_SetPosition(DWORD pos)
     return -2.0;
 
   if (pos & XMPIN_POS_SUBSONG) {
+    /* One playlist item — no Shift+arrow tracks. Restart only. */
     sub = (int)(pos & 0xFFFFu);
-    if (tfmx_player_set_song(g_play, sub) != 0)
+    if (sub != 0)
       return -1.0;
-    set_length_now(tfmx_player_duration_ms(g_play, sub));
+    if (tfmx_player_set_song(g_play, 0) != 0)
+      return -1.0;
+    set_length_now(tfmx_player_duration_ms(g_play, 0));
     if (xmpfin && xmpfin->UpdateTitle)
       xmpfin->UpdateTitle(NULL);
     return 0.0;
@@ -695,11 +692,12 @@ static DWORD WINAPI tfmx_Process(float *buf, DWORD count)
 
 static DWORD WINAPI tfmx_GetSubSongs(float *length)
 {
+  /* 0 or 1 only — never NSF-split into table slots. */
   if (!g_play)
     return 0;
   if (length)
-    *length = (float)tfmx_player_total_duration_ms(g_play) / 1000.0f;
-  return (DWORD)tfmx_player_songs(g_play);
+    *length = (float)tfmx_player_duration_ms(g_play, 0) / 1000.0f;
+  return 1;
 }
 
 static const char g_exts[] = "TFMX\0tfx/tfm/mdat/tfmx";

@@ -1,6 +1,10 @@
 /*
  * Host-testable TFMX (Hülsbeck) wrapper used by xmp-tfmx.
  * Engine: libtfmxaudiodecoder (GPLv2+).
+ *
+ * A file is ONE playlist item. Real song-table slots are chained
+ * back-to-back into a single length (seekable). SFX / empty slots
+ * are skipped, not exposed as NSF tracks.
  */
 #ifndef TFMX_PLAYER_H
 #define TFMX_PLAYER_H
@@ -25,8 +29,8 @@ extern "C" {
 #define TFMX_TAIL_MS       250
 
 typedef struct tfmx_info {
-  int  songs;
-  int  duration_ms[TFMX_MAX_SONGS];
+  int  songs;                    /* always 1 when analyze succeeds */
+  int  duration_ms[TFMX_MAX_SONGS]; /* [0] = chained total */
   int  voices;
   char title[TFMX_STR];
   char artist[TFMX_STR];
@@ -38,7 +42,7 @@ typedef struct tfmx_info {
 /* 1 if Hülsbeck TFMX (not Hippel / Future Composer / DNS). */
 int tfmx_probe(const unsigned char *data, size_t len);
 
-/* Open, measure per-track length, close. Returns 0 on success. */
+/* Open, measure chained length, close. Returns 0 on success. */
 int tfmx_analyze(const char *path,
                  const unsigned char *mdat, size_t mdat_len,
                  const unsigned char *smpl, size_t smpl_len,
@@ -53,9 +57,9 @@ tfmx_player *tfmx_player_open(const char *path,
                               const unsigned char *smpl, size_t smpl_len);
 void         tfmx_player_close(tfmx_player *p);
 
-int    tfmx_player_songs(const tfmx_player *p);
-int    tfmx_player_song(const tfmx_player *p); /* 0-based exposed index */
-int    tfmx_player_set_song(tfmx_player *p, int song0);
+int    tfmx_player_songs(const tfmx_player *p); /* 1 when open */
+int    tfmx_player_song(const tfmx_player *p);  /* always 0 */
+int    tfmx_player_set_song(tfmx_player *p, int song0); /* only 0 */
 int    tfmx_player_rate(const tfmx_player *p);
 int    tfmx_player_voices(const tfmx_player *p);
 int    tfmx_player_duration_ms(const tfmx_player *p, int song0);
@@ -65,7 +69,8 @@ int    tfmx_player_seek_ms(tfmx_player *p, int ms);
 int    tfmx_player_ended(const tfmx_player *p);
 
 /* Decode stereo float samples. count = number of floats (L+R).
- * Returns floats written (0 = end). */
+ * Returns floats written. 0 only when pos_ms >= total duration
+ * (or a hard error with no player). Never EOF on song_end. */
 int    tfmx_player_process(tfmx_player *p, float *stereo, int count);
 
 const char *tfmx_player_title(const tfmx_player *p);

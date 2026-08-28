@@ -1,9 +1,19 @@
 /*
  * TFMX (Hülsbeck) player wrapper around libtfmxaudiodecoder.
  *
- * Exposes only real tunes (sustained audio). One-note / empty / SFX
- * song-table slots are dropped. Temp files use the original filename
- * stem (never a hardcoded "mod.tfx").
+ * One playlist item per file. Real song-table slots (sustained audio)
+ * are chained back-to-back into a single seekable length. One-note /
+ * empty / SFX slots are dropped, not NSF tracks.
+ *
+ * Process never returns 0 until pos_ms >= total duration. song_end is
+ * ignored for stopping; decoder errors become silence until the cap.
+ *
+ * Init matches qmmp-tfmx / libtfmxaudiodecoder: set_path(real .tfx),
+ * end_shorts(1, 10), mixer_init, then init from slurped bytes. The
+ * library finds the sibling .sam from that real path (Chris/TFMXDecoder
+ * — Hülsbeck only; Jochen/TFMX.cpp is Hippel and is not used).
+ * A temp pair is written only for memory-only opens (no usable path)
+ * when both blobs are already in hand. Stem is never hardcoded "mod".
  */
 #include "tfmx_player.h"
 
@@ -39,13 +49,18 @@
 struct tfmx_player {
   void *dec;
   int rate;
-  int songs;                 /* exposed (real) count */
-  int song;                  /* exposed index */
+  int songs;                 /* exposed count: always 1 when open */
+  int song;                  /* always 0 */
+  int n_slots;               /* real library slots in the chain */
   int slot_of[TFMX_MAX_SONGS];
+  int slot_dur[TFMX_MAX_SONGS];
+  int slot_start[TFMX_MAX_SONGS];
+  int cur_slot;
+  int slot_ready;
   int voices;
   int ended;
   int pos_ms;
-  int duration_ms[TFMX_MAX_SONGS];
+  int duration_ms;           /* sum of slot_dur — the one advertised length */
   int samples_acc;
   char title[TFMX_STR];
   char artist[TFMX_STR];
@@ -380,9 +395,11 @@ static int init_decoder(void *dec, const char *path,
                         const unsigned char *mdat, size_t mdat_len)
 {
   int ok;
+  /* qmmp-tfmx order: set_path(real file), end_shorts, mixer, then init. */
   if (path && path[0])
     tfmxdec_set_path(dec, path);
-  tfmxdec_set_loop_mode(dec, 1);
+  tfmxdec_end_shorts(dec, 1, 10);
+  apply_mixer(dec);
   ok = 0;
   if (mdat && mdat_len)
     ok = tfmxdec_init(dec, (void *)mdat, (uint32_t)mdat_len, 0);
@@ -396,7 +413,42 @@ static int init_decoder(void *dec, const char *path,
   return 1;
 }
 
-/* Keep only slots with sustained audio. Map exposed index -> decoder slot. */
+static int switch_to_slot(tfmx_player *p, int idx, int local_ms)
+{
+  if (!p || idx < 0 || idx >= p->n_slots)
+    return 0;
+  p->cur_slot = idx;
+  if (!p->dec)
+    return 0;
+  if (!tfmxdec_reinit(p->dec, p->slot_of[idx]))
+    return 0;
+  apply_mixer(p->dec);
+  if (local_ms > 0)
+    tfmxdec_seek(p->dec, local_ms);
+  return 1;
+}
+
+/* Map pos_ms onto the slot chain. Retry reinit if the last one failed. */
+static void ensure_slot_for_pos(tfmx_player *p)
+{
+  int i, want, local, end;
+  if (!p || p->n_slots < 1)
+    return;
+  want = 0;
+  for (i = 0; i < p->n_slots; ++i) {
+    end = (i + 1 < p->n_slots) ? p->slot_start[i + 1] : p->duration_ms;
+    if (p->pos_ms >= p->slot_start[i] && (p->pos_ms < end || i == p->n_slots - 1))
+      want = i;
+  }
+  local = p->pos_ms - p->slot_start[want];
+  if (local < 0) local = 0;
+  if (want != p->cur_slot || !p->slot_ready) {
+    p->slot_ready = switch_to_slot(p, want, local);
+    p->cur_slot = want;
+  }
+}
+
+/* Keep only slots with sustained audio. Chain them as one stream. */
 static void snapshot_real_songs(tfmx_player *p)
 {
   int n, i, exposed = 0;
@@ -419,7 +471,7 @@ static void snapshot_real_songs(tfmx_player *p)
     if (!real || dur < 1)
       continue;
     p->slot_of[exposed] = i;
-    p->duration_ms[exposed] = dur;
+    p->slot_dur[exposed] = dur;
     exposed++;
   }
 
@@ -430,19 +482,24 @@ static void snapshot_real_songs(tfmx_player *p)
       apply_mixer(p->dec);
     }
     p->slot_of[0] = 0;
-    p->duration_ms[0] = (int)tfmxdec_duration(p->dec);
-    if (p->duration_ms[0] < TFMX_TINY_MS)
-      p->duration_ms[0] = measure_until_silence(p->dec);
-    if (p->duration_ms[0] < 1)
-      p->duration_ms[0] = 1;
+    p->slot_dur[0] = (int)tfmxdec_duration(p->dec);
+    if (p->slot_dur[0] < TFMX_TINY_MS)
+      p->slot_dur[0] = measure_until_silence(p->dec);
+    if (p->slot_dur[0] < 1)
+      p->slot_dur[0] = 1;
     exposed = 1;
   }
 
-  p->songs = exposed;
-  if (p->slot_of[0] != cur) {
-    tfmxdec_reinit(p->dec, p->slot_of[0]);
-    apply_mixer(p->dec);
+  p->n_slots = exposed;
+  p->songs = 1;
+  p->song = 0;
+  p->duration_ms = 0;
+  for (i = 0; i < exposed; ++i) {
+    p->slot_start[i] = p->duration_ms;
+    p->duration_ms += p->slot_dur[i];
   }
+  p->cur_slot = 0;
+  p->slot_ready = 0;
 }
 
 tfmx_player *tfmx_player_open(const char *path,
@@ -465,31 +522,30 @@ tfmx_player *tfmx_player_open(const char *path,
     return NULL;
   }
 
-  if (smpl && smpl_len && mdat && mdat_len) {
+  /* Real on-disk .tfx: always set_path to THAT file so .sam is the sibling.
+   * Temp pair only when there is no usable directory (memory-only) and
+   * we already have both blobs. */
+  if (path && path[0]) {
+    use_path = path;
+  } else if (smpl && smpl_len && mdat && mdat_len) {
     make_temp_pair(p, mdat, mdat_len, smpl, smpl_len);
     if (p->temp_tfx[0])
       use_path = p->temp_tfx;
   }
 
   if (!init_decoder(p->dec, use_path, mdat, mdat_len)) {
-    if (use_path != path && path && path[0]) {
-      if (init_decoder(p->dec, path, mdat, mdat_len))
-        goto ok;
-    }
     tfmxdec_delete(p->dec);
     cleanup_temp(p);
     free(p);
     return NULL;
   }
 
-ok:
   snapshot_real_songs(p);
-  tfmxdec_reinit(p->dec, p->slot_of[0]);
-  apply_mixer(p->dec);
-  p->song = 0;
+  p->slot_ready = switch_to_slot(p, 0, 0);
   p->voices = tfmxdec_voices(p->dec);
   p->ended = 0;
   p->pos_ms = 0;
+  p->samples_acc = 0;
   apply_display_names(p);
   return p;
 }
@@ -513,94 +569,138 @@ int tfmx_player_position_ms(const tfmx_player *p) { return p ? p->pos_ms : 0; }
 
 int tfmx_player_duration_ms(const tfmx_player *p, int song0)
 {
-  if (!p || song0 < 0 || song0 >= p->songs)
+  if (!p || song0 != 0)
     return 0;
-  return p->duration_ms[song0];
+  return p->duration_ms;
 }
 
 int tfmx_player_total_duration_ms(const tfmx_player *p)
 {
-  int i, t = 0;
-  if (!p)
-    return 0;
-  for (i = 0; i < p->songs; ++i)
-    t += p->duration_ms[i];
-  return t;
+  return p ? p->duration_ms : 0;
 }
 
 int tfmx_player_set_song(tfmx_player *p, int song0)
 {
-  int slot;
-  if (!p || !p->dec)
+  if (!p)
     return -1;
-  if (song0 < 0 || song0 >= p->songs)
+  if (song0 != 0)
     return -1;
-  slot = p->slot_of[song0];
-  if (!tfmxdec_reinit(p->dec, slot))
-    return -1;
-  apply_mixer(p->dec);
-  p->song = song0;
-  p->ended = 0;
   p->pos_ms = 0;
   p->samples_acc = 0;
+  p->ended = 0;
+  p->slot_ready = 0;
+  p->cur_slot = 0;
+  p->slot_ready = switch_to_slot(p, 0, 0);
   apply_display_names(p);
   return 0;
 }
 
 int tfmx_player_seek_ms(tfmx_player *p, int ms)
 {
-  int cap;
-  if (!p || !p->dec)
+  if (!p)
     return -1;
   if (ms < 0)
     ms = 0;
-  cap = p->duration_ms[p->song];
-  if (cap > 0 && ms > cap)
-    ms = cap;
-  tfmxdec_seek(p->dec, ms);
+  if (p->duration_ms > 0 && ms > p->duration_ms)
+    ms = p->duration_ms;
   p->pos_ms = ms;
   p->samples_acc = 0;
-  p->ended = 0;
+  p->ended = (p->duration_ms > 0 && ms >= p->duration_ms) ? 1 : 0;
+  p->slot_ready = 0;
+  if (!p->ended)
+    ensure_slot_for_pos(p);
   return p->pos_ms;
 }
 
-int tfmx_player_process(tfmx_player *p, float *stereo, int count)
+static void advance_pos(tfmx_player *p, int frames)
 {
-  int frames, bytes, i, nsamp, cap;
-  const int16_t *s;
-
-  if (!p || !p->dec || !stereo || p->ended)
-    return 0;
-  frames = count / 2;
-  if (frames <= 0)
-    return 0;
-  bytes = frames * 4;
-  if (bytes > SCRATCH)
-    bytes = SCRATCH;
-  frames = bytes / 4;
-  memset(p->scratch, 0, (size_t)bytes);
-  tfmxdec_buffer_fill(p->dec, p->scratch, (uint32_t)bytes);
-  nsamp = frames * 2;
-  s = (const int16_t *)p->scratch;
-  for (i = 0; i < nsamp; ++i)
-    stereo[i] = (float)s[i] * (1.0f / 32768.0f);
-
+  if (!p || p->rate < 1000)
+    return;
   p->samples_acc += frames;
-  while (p->samples_acc >= p->rate / 1000 && p->rate >= 1000) {
+  while (p->samples_acc >= p->rate / 1000) {
     int step = p->rate / 1000;
     int nms = p->samples_acc / step;
     p->pos_ms += nms;
     p->samples_acc -= nms * step;
   }
-  cap = p->duration_ms[p->song];
-  /* Loop-end (song_end) is not EOF while a measured length remains. */
-  if (cap > 0) {
-    if (p->pos_ms >= cap)
-      p->ended = 1;
-  } else if (tfmxdec_song_end(p->dec)) {
+}
+
+int tfmx_player_process(tfmx_player *p, float *stereo, int count)
+{
+  int want_frames, written = 0;
+
+  if (!p || !stereo)
+    return 0;
+  want_frames = count / 2;
+  if (want_frames <= 0)
+    return 0;
+
+  if (p->ended || (p->duration_ms > 0 && p->pos_ms >= p->duration_ms)) {
     p->ended = 1;
+    return 0;
   }
-  return frames * 2;
+
+  /* song_end is ignored for stopping. Decoder errors become silence. */
+  while (written < want_frames) {
+    int remain_ms, remain_slot, chunk, i, nsamp, max_fr;
+    const int16_t *s;
+
+    if (p->duration_ms > 0 && p->pos_ms >= p->duration_ms) {
+      p->ended = 1;
+      break;
+    }
+
+    ensure_slot_for_pos(p);
+
+    remain_ms = (p->duration_ms > 0) ? (p->duration_ms - p->pos_ms) : 0x7fffffff;
+    if (remain_ms < 1) {
+      p->ended = 1;
+      break;
+    }
+    remain_slot = remain_ms;
+    if (p->cur_slot + 1 < p->n_slots) {
+      int slot_end = p->slot_start[p->cur_slot + 1];
+      if (slot_end - p->pos_ms < remain_slot && slot_end > p->pos_ms)
+        remain_slot = slot_end - p->pos_ms;
+    }
+
+    chunk = want_frames - written;
+    if (chunk * 4 > SCRATCH)
+      chunk = SCRATCH / 4;
+    max_fr = (int)(((int64_t)remain_slot * (int64_t)p->rate + 999) / 1000);
+    if (max_fr < 1) max_fr = 1;
+    if (chunk > max_fr) chunk = max_fr;
+
+    memset(p->scratch, 0, (size_t)chunk * 4);
+    if (p->dec && p->slot_ready)
+      tfmxdec_buffer_fill(p->dec, p->scratch, (uint32_t)(chunk * 4));
+    /* else: silence until the cap / next slot */
+
+    nsamp = chunk * 2;
+    s = (const int16_t *)p->scratch;
+    for (i = 0; i < nsamp; ++i)
+      stereo[written * 2 + i] = (float)s[i] * (1.0f / 32768.0f);
+
+    advance_pos(p, chunk);
+    written += chunk;
+
+    /* Crossing a slot boundary: force reinit of the next slot next loop. */
+    if (p->cur_slot + 1 < p->n_slots &&
+        p->pos_ms >= p->slot_start[p->cur_slot + 1])
+      p->slot_ready = 0;
+  }
+
+  if (p->duration_ms > 0 && p->pos_ms >= p->duration_ms)
+    p->ended = 1;
+
+  if (written <= 0 && !p->ended) {
+    /* Never hand the host an early EOF. One silent stereo frame. */
+    stereo[0] = 0.0f;
+    stereo[1] = 0.0f;
+    advance_pos(p, 1);
+    written = 1;
+  }
+  return written * 2;
 }
 
 const char *tfmx_player_title(const tfmx_player *p) { return p ? p->title : ""; }
@@ -615,17 +715,15 @@ int tfmx_analyze(const char *path,
                  tfmx_info *out)
 {
   tfmx_player *p;
-  int i;
   if (!out)
     return -1;
   memset(out, 0, sizeof *out);
   p = tfmx_player_open(path, mdat, mdat_len, smpl, smpl_len);
   if (!p)
     return -1;
-  out->songs = p->songs;
+  out->songs = 1;
   out->voices = p->voices;
-  for (i = 0; i < p->songs && i < TFMX_MAX_SONGS; ++i)
-    out->duration_ms[i] = p->duration_ms[i];
+  out->duration_ms[0] = p->duration_ms;
   bounded_copy(out->title, sizeof out->title, p->title);
   bounded_copy(out->artist, sizeof out->artist, p->artist);
   bounded_copy(out->name, sizeof out->name, p->name);
