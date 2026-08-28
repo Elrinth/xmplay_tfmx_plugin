@@ -23,6 +23,8 @@ extern "C" {
 #define TFMX_DETECT_CAP_MS (10 * 60 * 1000)
 #define TFMX_SILENCE_MS    2000
 #define TFMX_TINY_MS       500   /* ignore one-note / bogus duration */
+#define TFMX_SANE_MIN_MS   2000  /* trust tfmxdec_duration from this */
+#define TFMX_SANE_MAX_MS   (12 * 60 * 1000) /* exclusive; never chain a 10-min cap */
 #define TFMX_CLASSIFY_MS   3500  /* render window to tell tune from SFX */
 #define TFMX_SUSTAIN_MS    2000  /* last peak must be this far after first */
 #define TFMX_HEARD_MIN_MS  2000

@@ -24,8 +24,8 @@
 #endif
 
 #define PLUGIN_NAME    "TFMX"
-#define PLUGIN_VERSION "1.0.4"
-#define PLUGIN_XMPVER  1000400  /* 1*1000000+0*10000+4*100; must match FILEVERSION */
+#define PLUGIN_VERSION "1.0.5"
+#define PLUGIN_XMPVER  1000500  /* 1*1000000+0*10000+5*100; must match FILEVERSION */
 #define MAX_MODULE_BYTES ((size_t)16u * 1024u * 1024u)
 #define MAX_SMPL_BYTES   ((size_t)32u * 1024u * 1024u)
 #define INFO_WRITE_MAX   32766
@@ -432,10 +432,10 @@ static void WINAPI tfmx_About(HWND win)
     "text block / mdat+smpl names).\r\n\r\n"
     "This plugin:\r\n"
     "  - seekable playhead (tfmxdec_seek, 1 ms)\r\n"
-    "  - real song length (library duration if it matches heard audio;\r\n"
-    "    else last audible sample + tail / 10-minute cap)\r\n"
-    "  - loop-end is not EOF — we play to the measured length\r\n"
-    "  - one playlist item: all real song-table slots play as one length\r\n"
+    "  - real song length (trusted one-loop library duration; leftover\r\n"
+    "    SFX/junk slots are not chained; lone loop may use 10-min cap)\r\n"
+    "  - loop-end is not EOF — we play to the advertised length\r\n"
+    "  - one playlist item: trusted song-table slots play as one length\r\n"
     "  - no fake NSF split / no Shift+arrow tracks\r\n"
     "  - .tfx + .sam (also .tfm/.mdat/.tfmx + .smpl, mdat./smpl.)\r\n"
     "  - shared sample set: Set.sam / smpl.set / smp.set in the same folder\r\n\r\n"

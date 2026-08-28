@@ -1,9 +1,9 @@
 /*
  * TFMX (Hülsbeck) player wrapper around libtfmxaudiodecoder.
  *
- * One playlist item per file. Real song-table slots (sustained audio)
- * are chained back-to-back into a single seekable length. One-note /
- * empty / SFX slots are dropped, not NSF tracks.
+ * One playlist item per file. Slots with a sane one-loop library
+ * duration are chained back-to-back. Leftover SFX / junk / 10-min-cap
+ * slots after that run are dropped, not NSF tracks.
  *
  * Process never returns 0 until pos_ms >= total duration. song_end is
  * ignored for stopping; decoder errors become silence until the cap.
@@ -251,8 +251,9 @@ static int measure_until_silence(void *dec)
 
 /*
  * Classify one decoder slot and pick a play length.
- * Real tune: last peak>=24 at least ~2s after first, or heard_ms >= 2s.
- * SFX / one-note / empty: dropped (real=0).
+ * Real tune: sustained audio AND a sane one-loop library duration
+ * (>= 2s, < 12 min). The 10-minute detect-cap is never a chainable
+ * duration — cap / no-song-end / one-note slots are SFX/loops (real=0).
  */
 static void classify_slot(void *dec, int *real, int *duration_ms,
                           int *first_peak, int *last_peak, int *heard_ms)
@@ -297,14 +298,13 @@ static void classify_slot(void *dec, int *real, int *duration_ms,
     if (!((fp >= 0 && sustain >= TFMX_SUSTAIN_MS) || heard >= TFMX_HEARD_MIN_MS))
       return; /* SFX / empty */
   }
-  *real = 1;
 
-  /* Library duration is a dry-run to first song_end (one loop). Trust it
-   * when it is not one-note-short and we already heard sustained audio. */
-  if (lib_dur >= TFMX_TINY_MS)
+  /* Trust tfmxdec_duration when it is a sane one-loop length. Never
+   * hand the 10-minute detect-cap to the chain (those are SFX/loops). */
+  if (lib_dur >= TFMX_SANE_MIN_MS && lib_dur < TFMX_SANE_MAX_MS) {
+    *real = 1;
     *duration_ms = lib_dur;
-  else
-    *duration_ms = measure_until_silence(dec);
+  }
 }
 
 static void apply_display_names(tfmx_player *p)
@@ -448,11 +448,17 @@ static void ensure_slot_for_pos(tfmx_player *p)
   }
 }
 
-/* Keep only slots with sustained audio. Chain them as one stream. */
+/* Keep a contiguous run of slots that have a trusted one-loop duration.
+ * Leftover SFX/junk after that run (tiny lib_dur, 10-min cap, or a gap)
+ * is dropped. If nothing is trusted, the only-slot fallback may keep the
+ * 10-minute measure cap (tiny.tfx sample-loop). */
 static void snapshot_real_songs(tfmx_player *p)
 {
   int n, i, exposed = 0;
   int cur = 0;
+  int trust_of[TFMX_MAX_SONGS];
+  int trust_dur[TFMX_MAX_SONGS];
+  int ntrust = 0;
 
   n = tfmxdec_songs(p->dec);
   if (n < 1) n = 1;
@@ -468,22 +474,40 @@ static void snapshot_real_songs(tfmx_player *p)
     }
     classify_slot(p->dec, &real, &dur, &fp, &lp, &heard);
     cur = i; /* classify may reinit current */
-    if (!real || dur < 1)
+    if (!real || dur < TFMX_SANE_MIN_MS || dur >= TFMX_SANE_MAX_MS)
       continue;
-    p->slot_of[exposed] = i;
-    p->slot_dur[exposed] = dur;
-    exposed++;
+    if (ntrust < TFMX_MAX_SONGS) {
+      trust_of[ntrust] = i;
+      trust_dur[ntrust] = dur;
+      ntrust++;
+    }
   }
 
-  if (exposed == 0) {
-    /* Last resort: still expose decoder song 0 so Open does not fail. */
+  if (ntrust > 0) {
+    /* First trusted slot is the song; chain further only while the
+     * next library slot is also trusted (user-mod 8 tunes). A gap is
+     * leftover SFX/junk — do not resume the chain after it. */
+    p->slot_of[0] = trust_of[0];
+    p->slot_dur[0] = trust_dur[0];
+    exposed = 1;
+    for (i = 1; i < ntrust; ++i) {
+      if (trust_of[i] != trust_of[i - 1] + 1)
+        break;
+      p->slot_of[exposed] = trust_of[i];
+      p->slot_dur[exposed] = trust_dur[i];
+      exposed++;
+    }
+  } else {
+    /* No sane one-loop duration. If this is the only slot (or nothing
+     * else is usable), keep a measured cap so Open does not fail.
+     * Never treat that cap as one item in a multi-slot chain. */
     if (cur != 0) {
       tfmxdec_reinit(p->dec, 0);
       apply_mixer(p->dec);
     }
     p->slot_of[0] = 0;
     p->slot_dur[0] = (int)tfmxdec_duration(p->dec);
-    if (p->slot_dur[0] < TFMX_TINY_MS)
+    if (p->slot_dur[0] < TFMX_SANE_MIN_MS || p->slot_dur[0] >= TFMX_SANE_MAX_MS)
       p->slot_dur[0] = measure_until_silence(p->dec);
     if (p->slot_dur[0] < 1)
       p->slot_dur[0] = 1;
