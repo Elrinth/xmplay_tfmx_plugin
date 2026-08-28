@@ -1,4 +1,4 @@
-# xmp-tfmx 1.0.4
+# xmp-tfmx 1.0.5
 
 Native **32-bit** XMPlay input plugin for Chris Hülsbeck **TFMX**
 (The Final Musicsystem eXtended).
@@ -20,7 +20,7 @@ Composer `.fc` (those conflict with other XMPlay plugins).
 
 Copy `xmp-tfmx.dll` next to `xmplay.exe` (or into XMPlay's plugin folder)
 and restart XMPlay. The DLL carries a Windows VERSIONINFO resource
-(FILEVERSION 1.0.4.0, PLUGIN_XMPVER 1000400) so XMPlay can include it
+(FILEVERSION 1.0.5.0, PLUGIN_XMPVER 1000500) so XMPlay can include it
 in update notifications. Classic XMPlay is **32-bit only** — this DLL
 is PE32 i386. A 64-bit build will not load.
 
@@ -50,16 +50,19 @@ TFMX-MOD).
 - **One playlist item per file.** `GetFileInfo` returns a single length;
   `GetSubSongs` returns 1 (never 8). There is no fake NSF split and no
   Shift+arrow tracks. The title is never `name - 1/8`.
-- Real song-table slots (sustained audio) play **back-to-back** as one
-  stream. Length is the sum of those slots (e.g. 6:46 when eight library
-  slots have audio). A file with one slot stays one stream of that slot.
-- Playlist / file-info length comes from `tfmxdec_duration()` per slot
-  when that matches heard audio (dry-run to the first loop / song-end).
-- If the engine reports 0 or a one-note-short time, that slot is measured
-  with loop mode on until 2 seconds of silence, capped at **10 minutes**.
+- Real song-table slots play **back-to-back** as one stream when each
+  slot has a **trusted one-loop duration** from `tfmxdec_duration()`
+  (at least 2 seconds and under 12 minutes). Length is the sum of that
+  contiguous run (e.g. 6:46 when eight library slots are real tunes).
+  Leftover SFX / junk slots after that run — including anything that
+  would only get the **10-minute detect-cap** — are dropped, not chained.
+- A file with one slot stays one stream of that slot. If that lone slot
+  has no song-end (sample-loop), it is measured until 2 seconds of
+  silence, capped at **10 minutes**.
 - Loop-end / `song_end` is not treated as EOF. Process does not return 0
-  until the playhead reaches the advertised total. Decoder errors become
-  silence until that cap — XMPlay is never handed an early end-of-file.
+  until the playhead reaches the advertised total, and **does** return 0
+  at that length so XMPlay does not play noise past the real tune.
+  Decoder errors become silence until the cap — never an early EOF.
 - Playhead is seekable (`SetLength(seconds, TRUE)`, granularity 1 ms);
   seek maps into the slot chain.
 - Playback uses loop mode so the first pattern loop does not stop a slot.
