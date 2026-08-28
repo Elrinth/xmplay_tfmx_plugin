@@ -1,5 +1,6 @@
 /*
- * Host-side detect / open / duration / render / seek tests for xmp-tfmx.
+ * Host-side detect / open / duration / render / seek tests for xmp-tfmx 1.0.3.
+ * A file is one playlist item. Process must not return 0 before the cap.
  */
 #include "tfmx_player.h"
 
@@ -102,18 +103,22 @@ static int check_title_not_mod(tfmx_player *p, const char *expect_stem)
   return 0;
 }
 
-static int check_no_early_end(tfmx_player *p, double sec)
+/* 576-frame XMPlay-sized chunks. Any Process==0 before want_sec is a fail
+ * unless pos_ms has already reached the advertised duration. */
+static int check_process_no_ret0(tfmx_player *p, double want_sec, const char *label)
 {
   float chunk[576 * 2];
   int rate = tfmx_player_rate(p);
-  int want = (int)(sec * rate);
-  int got = 0, heard = 0, early_end = 0;
+  int want = (int)(want_sec * rate + 0.5);
+  int got = 0, heard = 0, ret0 = 0;
   int n, i, peak16;
+  int cap = tfmx_player_duration_ms(p, 0);
+  int start_pos = tfmx_player_position_ms(p);
+
   while (got < want) {
     n = tfmx_player_process(p, chunk, (int)(sizeof chunk / sizeof chunk[0]));
     if (n <= 0) {
-      if (tfmx_player_position_ms(p) < 500)
-        early_end = 1;
+      ret0 = 1;
       break;
     }
     peak16 = 0;
@@ -127,20 +132,27 @@ static int check_no_early_end(tfmx_player *p, double sec)
     if (peak16 >= 24) heard += n / 2;
     got += n / 2;
   }
-  printf("  render %.1fs: frames=%d heard=%d pos=%d ended=%d early_end=%d\n",
-         sec, got, heard, tfmx_player_position_ms(p), tfmx_player_ended(p), early_end);
-  if (early_end) {
-    fprintf(stderr, "FAIL: Process returned 0 in first 500ms\n");
+  printf("  %s: frames=%d heard=%d pos=%d->%d ended=%d ret0=%d cap=%d\n",
+         label, got, heard, start_pos, tfmx_player_position_ms(p),
+         tfmx_player_ended(p), ret0, cap);
+  if (ret0) {
+    int pos = tfmx_player_position_ms(p);
+    if (cap > 0 && pos >= cap - 50) {
+      printf("  (ret0 at cap — OK)\n");
+    } else {
+      fprintf(stderr, "FAIL: Process returned 0 during %s (pos=%d cap=%d)\n",
+              label, pos, cap);
+      g_fail++;
+      return -1;
+    }
+  }
+  if (got < (int)(0.5 * rate) && want >= rate) {
+    fprintf(stderr, "FAIL: %s rendered too little (frames=%d)\n", label, got);
     g_fail++;
     return -1;
   }
-  if (got < (int)(3 * rate)) {
-    fprintf(stderr, "FAIL: less than ~3s rendered (frames=%d)\n", got);
-    g_fail++;
-    return -1;
-  }
-  if (heard < rate / 4) {
-    fprintf(stderr, "FAIL: not enough intermittent audio (heard=%d)\n", heard);
+  if (heard < rate / 8 && want >= rate) {
+    fprintf(stderr, "FAIL: %s not enough audio (heard=%d)\n", label, heard);
     g_fail++;
     return -1;
   }
@@ -185,14 +197,14 @@ static int test_user_song(void)
     free(smpl);
     return -1;
   }
-  printf("analyze path: songs=%d duration0=%d title='%s' name='%s' fmt='%s'\n",
+  printf("GetFileInfo equiv: n=%d duration0=%d title='%s' name='%s' fmt='%s'\n",
          inf.songs, inf.duration_ms[0], inf.title, inf.name, inf.format_name);
   if (inf.songs != 1) {
-    fprintf(stderr, "FAIL: user-song should be 1 track (got %d)\n", inf.songs);
+    fprintf(stderr, "FAIL: user-song GetFileInfo n=%d want 1\n", inf.songs);
     g_fail++;
   }
-  if (inf.duration_ms[0] < 35000 || inf.duration_ms[0] > 50000) {
-    fprintf(stderr, "FAIL: user-song duration %d not ~42s\n", inf.duration_ms[0]);
+  if (inf.duration_ms[0] < 41500 || inf.duration_ms[0] > 42500) {
+    fprintf(stderr, "FAIL: user-song duration %d not ~42020 ms\n", inf.duration_ms[0]);
     g_fail++;
   }
 
@@ -208,11 +220,15 @@ static int test_user_song(void)
   }
 
   dur = tfmx_player_duration_ms(p, 0);
-  printf("open: songs=%d voices=%d duration_ms=%d\n",
+  printf("open: songs_exposed=%d voices=%d duration_ms=%d\n",
          tfmx_player_songs(p), tfmx_player_voices(p), dur);
   check_title_not_mod(p, "user-song");
   if (tfmx_player_songs(p) != 1) {
     fprintf(stderr, "FAIL: user-song songs=%d want 1\n", tfmx_player_songs(p));
+    g_fail++;
+  }
+  if (dur < 41500 || dur > 42500) {
+    fprintf(stderr, "FAIL: user-song duration_ms=%d want ~42020\n", dur);
     g_fail++;
   }
 
@@ -224,7 +240,7 @@ static int test_user_song(void)
   }
 
   tfmx_player_seek_ms(p, 0);
-  check_no_early_end(p, 10.0);
+  check_process_no_ret0(p, 10.0, "user-song first 10s");
 
   seek_to = dur > 4000 ? dur / 2 : 1000;
   pos = tfmx_player_seek_ms(p, seek_to);
@@ -250,7 +266,9 @@ static int test_user_mod(void)
   size_t mlen, slen;
   tfmx_player *p;
   tfmx_info inf;
-  int i, n, sum = 0;
+  double rms, peak;
+  int dur, pos, frames;
+  const int expect_ms = 406240;
 
   printf("==== user-mod.tfx ====\n");
   mdat = slurp(tfx, &mlen);
@@ -274,14 +292,14 @@ static int test_user_mod(void)
     free(smpl);
     return -1;
   }
-  printf("analyze: songs=%d title='%s' name='%s'\n", inf.songs, inf.title, inf.name);
-  for (i = 0; i < inf.songs; ++i) {
-    printf("  exposed[%d] duration=%d\n", i, inf.duration_ms[i]);
-    sum += inf.duration_ms[i];
+  printf("GetFileInfo equiv: n=%d duration0=%d title='%s' name='%s'\n",
+         inf.songs, inf.duration_ms[0], inf.title, inf.name);
+  if (inf.songs != 1) {
+    fprintf(stderr, "FAIL: user-mod GetFileInfo n=%d want 1 (no NSF split)\n", inf.songs);
+    g_fail++;
   }
-  printf("sum=%d ms (%.1fs)\n", sum, sum / 1000.0);
-  if (inf.songs < 1) {
-    fprintf(stderr, "FAIL: user-mod exposed 0 songs\n");
+  if (inf.duration_ms[0] < expect_ms - 500 || inf.duration_ms[0] > expect_ms + 500) {
+    fprintf(stderr, "FAIL: user-mod duration %d want %d\n", inf.duration_ms[0], expect_ms);
     g_fail++;
   }
   if (ieq(inf.title, "mod") || ieq(inf.name, "mod")) {
@@ -297,29 +315,51 @@ static int test_user_mod(void)
     free(smpl);
     return -1;
   }
-  n = tfmx_player_songs(p);
-  printf("open: songs=%d\n", n);
+  dur = tfmx_player_duration_ms(p, 0);
+  printf("open: songs_exposed=%d duration_ms=%d (%d:%02d)\n",
+         tfmx_player_songs(p), dur, dur / 60000, (dur / 1000) % 60);
   check_title_not_mod(p, "user-mod");
-  if (n != inf.songs) {
-    fprintf(stderr, "FAIL: open songs=%d analyze=%d\n", n, inf.songs);
+  if (tfmx_player_songs(p) != 1) {
+    fprintf(stderr, "FAIL: user-mod songs_exposed=%d want 1\n", tfmx_player_songs(p));
+    g_fail++;
+  }
+  if (dur < expect_ms - 500 || dur > expect_ms + 500) {
+    fprintf(stderr, "FAIL: user-mod duration_ms=%d want %d\n", dur, expect_ms);
     g_fail++;
   }
 
-  for (i = 0; i < n; ++i) {
-    int d = tfmx_player_duration_ms(p, i);
-    printf("-- exposed track %d duration=%d --\n", i, d);
-    if (d < 2000) {
-      fprintf(stderr, "FAIL: exposed track %d duration %d < 2s (SFX leak)\n", i, d);
-      g_fail++;
-    }
-    if (tfmx_player_set_song(p, i) != 0) {
-      fprintf(stderr, "FAIL: set_song %d\n", i);
-      g_fail++;
-      continue;
-    }
-    check_title_not_mod(p, "user-mod");
-    check_no_early_end(p, 4.0);
+  /* First 15s of the chained stream — no Process 0. */
+  tfmx_player_seek_ms(p, 0);
+  check_process_no_ret0(p, 15.0, "user-mod first 15s");
+
+  /* Seek 3:00 (slot 3 of the chain) */
+  pos = tfmx_player_seek_ms(p, 3 * 60 * 1000);
+  printf("seek 3:00 -> %d\n", pos);
+  frames = render_sec(p, 2.0, &rms, &peak);
+  printf("  after 3:00: frames=%d rms=%.6f peak=%.6f pos=%d\n",
+         frames, rms, peak, tfmx_player_position_ms(p));
+  if (frames < 200 || rms < 1e-6) {
+    fprintf(stderr, "FAIL: silent after seek 3:00 (rms=%g)\n", rms);
+    g_fail++;
   }
+  check_process_no_ret0(p, 3.0, "user-mod after 3:00");
+
+  /* Seek 6:00 (slot 6 of the chain) */
+  pos = tfmx_player_seek_ms(p, 6 * 60 * 1000);
+  printf("seek 6:00 -> %d\n", pos);
+  frames = render_sec(p, 2.0, &rms, &peak);
+  printf("  after 6:00: frames=%d rms=%.6f peak=%.6f pos=%d\n",
+         frames, rms, peak, tfmx_player_position_ms(p));
+  if (frames < 200 || rms < 1e-6) {
+    fprintf(stderr, "FAIL: silent after seek 6:00 (rms=%g)\n", rms);
+    g_fail++;
+  }
+  check_process_no_ret0(p, 3.0, "user-mod after 6:00");
+
+  /* Cross first slot boundary (~44.8s) without ret0. */
+  pos = tfmx_player_seek_ms(p, 44000);
+  printf("seek 44.0s -> %d\n", pos);
+  check_process_no_ret0(p, 3.0, "user-mod slot-boundary 44s");
 
   tfmx_player_close(p);
   free(mdat);
