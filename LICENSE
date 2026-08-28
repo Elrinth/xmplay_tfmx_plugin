@@ -1,0 +1,7 @@
+This plugin is licensed under the GNU General Public License v2.0 or later,
+because it statically links libtfmxaudiodecoder by Michael Schwendt,
+which is GPLv2+.
+
+See https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+and third_party/libtfmxaudiodecoder/COPYING.
+
