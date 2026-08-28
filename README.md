@@ -1,4 +1,4 @@
-# xmp-tfmx 1.0.3
+# xmp-tfmx 1.0.4
 
 Native **32-bit** XMPlay input plugin for Chris Hülsbeck **TFMX**
 (The Final Musicsystem eXtended).
@@ -20,7 +20,7 @@ Composer `.fc` (those conflict with other XMPlay plugins).
 
 Copy `xmp-tfmx.dll` next to `xmplay.exe` (or into XMPlay's plugin folder)
 and restart XMPlay. The DLL carries a Windows VERSIONINFO resource
-(FILEVERSION 1.0.3.0, PLUGIN_XMPVER 1000300) so XMPlay can include it
+(FILEVERSION 1.0.4.0, PLUGIN_XMPVER 1000400) so XMPlay can include it
 in update notifications. Classic XMPlay is **32-bit only** — this DLL
 is PE32 i386. A 64-bit build will not load.
 
@@ -36,10 +36,14 @@ XMPlay's *Supported file types* list shows **TFMX** with extensions
 | `.mdat`   | Amiga-style music data; sibling `.smpl` |
 | `mdat.*`  | Amiga prefix; sibling `smpl.*` / `SMPL.*` |
 
-Sample sidecars: `.sam` / `.smpl` / `smpl.` / `SMPL.` (and `smpl.set` via
-the engine). CheckFile only inspects the music-data file (no sidecar
-required to add to the playlist). Open must find the sidecar — or a
-merged single-file format (TFMXPAK / TFHD / TFMX-MOD).
+Sample sidecars: stem-matched `.sam` / `.smpl` / `smpl.` / `SMPL.` first,
+then a **folder-shared** sample set in the same directory as the `.tfx`:
+`Set.sam` / `set.sam` / `SET.SAM` / `smpl.set` / `SMPL.set` / `smp.set`.
+Several songs can share one `Set.sam` (TFMX Professional style). A
+per-song `song.sam` still wins if present. CheckFile only inspects the
+music-data file (no sidecar required to add to the playlist). Open must
+find the sidecar — or a merged single-file format (TFMXPAK / TFHD /
+TFMX-MOD).
 
 ## Length + seek
 
@@ -60,9 +64,9 @@ merged single-file format (TFMXPAK / TFHD / TFMX-MOD).
   seek maps into the slot chain.
 - Playback uses loop mode so the first pattern loop does not stop a slot.
 - Open uses the real `.tfx` path (`tfmxdec_set_path`) so the library
-  finds the sibling `.sam` next to it — same as qmmp-tfmx. A temp pair
-  is only written for memory-only opens. Engine is Chris/Hülsbeck
-  `TFMXDecoder`, not Jochen/Hippel.
+  finds the sibling `.sam` or a shared `Set.sam` / `smpl.set` next to
+  it — same as qmmp-tfmx. A temp pair is only written for memory-only
+  opens. Engine is Chris/Hülsbeck `TFMXDecoder`, not Jochen/Hippel.
 
 
 The displayed title is the module title when it is non-empty and not
@@ -97,7 +101,8 @@ Needs `g++` and `i686-w64-mingw32-g++` / `windres`. The DLL is linked
 
 Do not commit copyrighted `.tfx` / `.sam` rips. Host tests look for
 `tests/samples/user-song.tfx` + `.sam` (and `user-mod.tfx` + `.sam`
-when present) locally.
+when present) locally, plus `tests/samples/kanzle/` (`kanzle-a.tfx`,
+`kanzle-b.tfx` + shared `Set.sam`, no per-song `.sam`).
 
 ## Credits
 

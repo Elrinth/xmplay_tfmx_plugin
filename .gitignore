@@ -11,4 +11,10 @@ tests/samples/*.smpl
 tests/samples/*.tfm
 tests/samples/*.tfmx
 tests/samples/*.mdat
-
+tests/samples/kanzle/
+tests/samples/**/*.tfx
+tests/samples/**/*.sam
+tests/samples/**/*.smpl
+tests/samples/**/*.tfm
+tests/samples/**/*.tfmx
+tests/samples/**/*.mdat
