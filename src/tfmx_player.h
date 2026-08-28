@@ -18,6 +18,7 @@ extern "C" {
 #define TFMX_RATE          44100
 #define TFMX_DETECT_CAP_MS (10 * 60 * 1000)
 #define TFMX_SILENCE_MS    2000
+#define TFMX_TINY_MS       500   /* ignore one-note / bogus duration */
 
 typedef struct tfmx_info {
   int  songs;
@@ -73,4 +74,3 @@ const char *tfmx_player_format_name(const tfmx_player *p);
 }
 #endif
 #endif
-

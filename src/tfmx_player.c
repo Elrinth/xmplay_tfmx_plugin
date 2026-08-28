@@ -102,7 +102,8 @@ int tfmx_probe(const unsigned char *data, size_t len)
 static void apply_mixer(void *dec)
 {
   tfmxdec_mixer_init(dec, TFMX_RATE, MIX_PREC, MIX_CHAN, MIX_ZERO, MIX_PAN);
-  tfmxdec_set_loop_mode(dec, 0);
+  /* Loop-end is not EOF. Play through to the measured duration. */
+  tfmxdec_set_loop_mode(dec, 1);
 }
 
 static int pcm_peak16(const int16_t *s, int nsamp)
@@ -116,7 +117,9 @@ static int pcm_peak16(const int16_t *s, int nsamp)
   return peak;
 }
 
-/* When the library reports 0 ms, render until song_end or 2s silence (cap 10 min). */
+/* Library duration is 0 or one-note-short. Render with loop_mode=1
+ * until 2s of silence (cap 10 min). Do NOT treat the first loop /
+ * song_end flag as EOF — many TFMX songs signal that after pattern 1. */
 static int measure_if_zero(void *dec)
 {
   unsigned char buf[4096];
@@ -128,6 +131,7 @@ static int measure_if_zero(void *dec)
   apply_mixer(dec);
   tfmxdec_reinit(dec, -1);
   apply_mixer(dec);
+  tfmxdec_set_loop_mode(dec, 1);
 
   while (total_ms < TFMX_DETECT_CAP_MS) {
     memset(buf, 0, sizeof buf);
@@ -143,8 +147,7 @@ static int measure_if_zero(void *dec)
       silent_ms += chunk_ms;
     }
     total_ms += chunk_ms;
-    if (tfmxdec_song_end(dec))
-      break;
+    /* song_end after the first loop is not EOF when looping is on. */
     if (heard && silent_ms >= TFMX_SILENCE_MS) {
       total_ms -= silent_ms;
       if (total_ms < 1) total_ms = 1;
@@ -161,7 +164,8 @@ static int measure_if_zero(void *dec)
 static int song_duration(void *dec)
 {
   uint32_t d = tfmxdec_duration(dec);
-  if (d > 0)
+  /* 0 or one-note-short: ignore and measure with loop_mode=1. */
+  if (d >= (uint32_t)TFMX_TINY_MS)
     return (int)d;
   return measure_if_zero(dec);
 }
@@ -244,7 +248,7 @@ static int init_decoder(void *dec, const char *path,
   int ok;
   if (path && path[0])
     tfmxdec_set_path(dec, path);
-  tfmxdec_set_loop_mode(dec, 0);
+  tfmxdec_set_loop_mode(dec, 1);
   ok = 0;
   if (mdat && mdat_len)
     ok = tfmxdec_init(dec, (void *)mdat, (uint32_t)mdat_len, 0);
@@ -321,6 +325,8 @@ tfmx_player *tfmx_player_open(const char *path,
 
 ok:
   snapshot_durations(p->dec, p->duration_ms, &p->songs);
+  tfmxdec_reinit(p->dec, 0);
+  apply_mixer(p->dec);
   p->song = 0;
   p->voices = tfmxdec_voices(p->dec);
   p->ended = 0;
@@ -432,10 +438,14 @@ int tfmx_player_process(tfmx_player *p, float *stereo, int count)
   }
   /* leftover-safe: also bump from frames if rate not divisible — keep simple */
   cap = p->duration_ms[p->song];
-  if (tfmxdec_song_end(p->dec))
+  /* Do not treat song_end as EOF while the measured duration is longer.
+   * Loop-mode is on, so the first pattern loop must not stop XMPlay. */
+  if (cap > 0) {
+    if (p->pos_ms >= cap)
+      p->ended = 1;
+  } else if (tfmxdec_song_end(p->dec)) {
     p->ended = 1;
-  if (cap > 0 && p->pos_ms >= cap)
-    p->ended = 1;
+  }
   return frames * 2;
 }
 
@@ -470,4 +480,3 @@ int tfmx_analyze(const char *path,
   tfmx_player_close(p);
   return 0;
 }
-

@@ -24,7 +24,7 @@
 #endif
 
 #define PLUGIN_NAME    "TFMX"
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.0.1"
 #define PLUGIN_XMPVER  1000000
 #define MAX_MODULE_BYTES ((size_t)16u * 1024u * 1024u)
 #define MAX_SMPL_BYTES   ((size_t)32u * 1024u * 1024u)
@@ -88,7 +88,7 @@ static void *xmp_alloc(DWORD n)
 static void remember_hint(const char *filename)
 {
   size_t n;
-  g_name_hint[0] = '\0';
+  /* Keep a previous hint if this call is memory-only (no path). */
   if (!filename || !filename[0])
     return;
   n = strlen(filename);
@@ -96,6 +96,15 @@ static void remember_hint(const char *filename)
     n = sizeof g_name_hint - 1;
   memcpy(g_name_hint, filename, n);
   g_name_hint[n] = '\0';
+}
+
+static const char *resolve_path(const char *filename)
+{
+  if (filename && filename[0])
+    return filename;
+  if (g_name_hint[0])
+    return g_name_hint;
+  return NULL;
 }
 
 static int slurp_xmpfile_max(XMPFILE file, unsigned char **out, size_t *out_len, size_t max_bytes)
@@ -200,7 +209,7 @@ static void unload_playback(void)
     tfmx_player_close(g_play);
     g_play = NULL;
   }
-  g_name_hint[0] = '\0';
+  /* Keep g_name_hint so a later memory-only Open can still find the sidecar. */
 }
 
 static int ieq(const char *a, const char *b)
@@ -415,8 +424,9 @@ static void WINAPI tfmx_About(HWND win)
     "text block / mdat+smpl names).\r\n\r\n"
     "This plugin:\r\n"
     "  - seekable playhead (tfmxdec_seek, 1 ms)\r\n"
-    "  - real song length (tfmxdec_duration; if 0, song_end / 2s\r\n"
-    "    silence, 10-minute cap — never a fake 3:00 forever)\r\n"
+    "  - real song length (tfmxdec_duration; if 0 or one-note-short,\r\n"
+    "    measure with loop on until 2s silence / 10-minute cap)\r\n"
+    "  - loop-end is not EOF — we play to the measured length\r\n"
     "  - .tfx + .sam (also .tfm/.mdat/.tfmx + .smpl, mdat./smpl.)\r\n"
     "  - NSF-style tracks (Shift+Left / Shift+Right)\r\n\r\n"
     "Engine: libtfmxaudiodecoder by Michael Schwendt.\r\n"
@@ -438,6 +448,7 @@ static BOOL WINAPI tfmx_CheckFile(const char *filename, XMPFILE file)
   int opened = 0;
   int ok;
 
+  remember_hint(filename);
   file = open_if_needed(filename, file, &opened);
   if (!file)
     return FALSE;
@@ -456,8 +467,13 @@ static tfmx_player *open_from(const char *filename, unsigned char *data, size_t 
   unsigned char *smpl = NULL;
   size_t smpl_len = 0;
   tfmx_player *pl;
-  find_sidecar(filename, &smpl, &smpl_len);
-  pl = tfmx_player_open(filename, data, len, smpl, smpl_len);
+  const char *path = resolve_path(filename);
+  /* Always try stem.sam / stem.smpl / smpl.stem / SMPL.stem via XMPlay. */
+  if (path && path[0])
+    find_sidecar(path, &smpl, &smpl_len);
+  if (!smpl && g_name_hint[0] && (!path || strcmp(path, g_name_hint) != 0))
+    find_sidecar(g_name_hint, &smpl, &smpl_len);
+  pl = tfmx_player_open(path, data, len, smpl, smpl_len);
   free(smpl);
   return pl;
 }
@@ -476,6 +492,7 @@ static DWORD WINAPI tfmx_GetFileInfo(const char *filename, XMPFILE file,
   if (length) *length = NULL;
   if (tags) *tags = NULL;
 
+  remember_hint(filename);
   file = open_if_needed(filename, file, &opened);
   if (!file)
     return 0;
@@ -485,11 +502,16 @@ static DWORD WINAPI tfmx_GetFileInfo(const char *filename, XMPFILE file,
   }
   close_if_opened(file, opened);
 
-  find_sidecar(filename, &smpl, &smpl_len);
-  if (tfmx_analyze(filename, data, len, smpl, smpl_len, &inf) != 0) {
-    free(data);
-    free(smpl);
-    return 0;
+  {
+    const char *path = resolve_path(filename);
+    find_sidecar(path, &smpl, &smpl_len);
+    if (!smpl && g_name_hint[0] && (!path || strcmp(path, g_name_hint) != 0))
+      find_sidecar(g_name_hint, &smpl, &smpl_len);
+    if (tfmx_analyze(path, data, len, smpl, smpl_len, &inf) != 0) {
+      free(data);
+      free(smpl);
+      return 0;
+    }
   }
   free(data);
   free(smpl);
@@ -768,4 +790,3 @@ __declspec(dllexport) XMPIN *WINAPI XMPIN_GetInterface(DWORD face, InterfaceProc
 #endif
 
 } /* extern "C" */
-
