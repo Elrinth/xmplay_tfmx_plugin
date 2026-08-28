@@ -1,5 +1,5 @@
 /*
- * Host-side detect / open / duration / render / seek tests for xmp-tfmx 1.0.3.
+ * Host-side detect / open / duration / render / seek tests for xmp-tfmx 1.0.4.
  * A file is one playlist item. Process must not return 0 before the cap.
  */
 #include "tfmx_player.h"
@@ -367,10 +367,97 @@ static int test_user_mod(void)
   return 0;
 }
 
+
+static int test_one_kanzle(const char *tfx, const char *expect_stem)
+{
+  unsigned char *mdat;
+  size_t mlen;
+  tfmx_player *p;
+  tfmx_info inf;
+  double rms, peak;
+  int frames, dur;
+
+  printf("==== %s (Set.sam only) ====\n", tfx);
+  mdat = slurp(tfx, &mlen);
+  if (!mdat) {
+    printf("SKIP: no %s\n", tfx);
+    return 0;
+  }
+  printf("mdat bytes: %zu  probe=%d\n", mlen, tfmx_probe(mdat, mlen));
+  if (tfmx_probe(mdat, mlen) != 1) {
+    fprintf(stderr, "FAIL: probe %s != 1\n", tfx);
+    g_fail++;
+    free(mdat);
+    return -1;
+  }
+
+  /* Path only: folder has Set.sam, not stem.sam. */
+  if (tfmx_analyze(tfx, mdat, mlen, NULL, 0, &inf) != 0) {
+    fprintf(stderr, "FAIL: analyze %s via Set.sam\n", tfx);
+    g_fail++;
+    free(mdat);
+    return -1;
+  }
+  printf("GetFileInfo equiv: n=%d duration0=%d title='%s' name='%s'\n",
+         inf.songs, inf.duration_ms[0], inf.title, inf.name);
+  if (inf.duration_ms[0] <= 2000) {
+    fprintf(stderr, "FAIL: %s duration %d not > 2s\n", tfx, inf.duration_ms[0]);
+    g_fail++;
+  }
+
+  p = tfmx_player_open(tfx, mdat, mlen, NULL, 0);
+  if (!p) {
+    fprintf(stderr, "FAIL: open %s with only Set.sam\n", tfx);
+    g_fail++;
+    free(mdat);
+    return -1;
+  }
+  dur = tfmx_player_duration_ms(p, 0);
+  printf("open: songs=%d voices=%d duration_ms=%d (%d:%02d)\n",
+         tfmx_player_songs(p), tfmx_player_voices(p), dur,
+         dur / 60000, (dur / 1000) % 60);
+  if (expect_stem)
+    check_title_not_mod(p, expect_stem);
+  if (dur <= 2000) {
+    fprintf(stderr, "FAIL: %s duration_ms=%d not > 2s\n", tfx, dur);
+    g_fail++;
+  }
+
+  frames = render_sec(p, 3.0, &rms, &peak);
+  printf("render 3s: frames=%d rms=%.6f peak=%.6f\n", frames, rms, peak);
+  if (frames < 1000 || rms < 1e-6 || peak < 1e-6) {
+    fprintf(stderr, "FAIL: %s first 3s silent or short (rms=%g peak=%g)\n",
+            tfx, rms, peak);
+    g_fail++;
+  }
+  tfmx_player_seek_ms(p, 0);
+  check_process_no_ret0(p, 3.0, expect_stem ? expect_stem : tfx);
+
+  tfmx_player_close(p);
+  free(mdat);
+  return 0;
+}
+
+static int test_kanzle(void)
+{
+  const char *a = "tests/samples/kanzle/kanzle-a.tfx";
+  const char *b = "tests/samples/kanzle/kanzle-b.tfx";
+  FILE *f = fopen("tests/samples/kanzle/Set.sam", "rb");
+  if (!f) {
+    printf("SKIP: no tests/samples/kanzle/Set.sam\n");
+    return 0;
+  }
+  fclose(f);
+  test_one_kanzle(a, "kanzle-a");
+  test_one_kanzle(b, "kanzle-b");
+  return 0;
+}
+
 int main(void)
 {
   test_user_song();
   test_user_mod();
+  test_kanzle();
   if (g_fail) {
     fprintf(stderr, "FAILED %d check(s)\n", g_fail);
     return 1;
