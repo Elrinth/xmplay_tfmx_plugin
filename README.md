@@ -1,4 +1,4 @@
-# xmp-tfmx 1.0.0
+# xmp-tfmx 1.0.1
 
 Native **32-bit** XMPlay input plugin for Chris Hülsbeck **TFMX**
 (The Final Musicsystem eXtended).
@@ -20,7 +20,7 @@ Composer `.fc` (those conflict with other XMPlay plugins).
 
 Copy `xmp-tfmx.dll` next to `xmplay.exe` (or into XMPlay's plugin folder)
 and restart XMPlay. The DLL carries a Windows VERSIONINFO resource
-(FILEVERSION 1.0.0.0) so XMPlay can include it in update notifications.
+(FILEVERSION 1.0.1.0) so XMPlay can include it in update notifications.
 Classic XMPlay is **32-bit only** — this DLL is PE32 i386. A 64-bit build
 will not load.
 
@@ -44,10 +44,11 @@ merged single-file format (TFMXPAK / TFHD / TFMX-MOD).
 ## Length + seek
 
 - Playlist / file-info length comes from `tfmxdec_duration()` (milliseconds).
-- If the engine reports 0, the plugin measures until `song_end` or 2 seconds
-  of silence, capped at **10 minutes**. It never fakes a forever-3:00.
+- If the engine reports 0 or a one-note-short time, the plugin measures with
+  loop mode on until 2 seconds of silence, capped at **10 minutes**.
+- Loop-end is not treated as EOF; we play to the measured length.
 - Playhead is seekable (`SetLength(seconds, TRUE)`, granularity 1 ms).
-- Loop mode is one-shot for length (no loop-count config in v1.0).
+- Playback uses loop mode so the first pattern loop does not stop the song.
 
 ## Multi-track
 
@@ -91,4 +92,3 @@ Do not commit copyrighted `.tfx` / `.sam` rips. Host tests look for
 - XMPlay plugin SDK — un4seen / Ian Luck
 
 License: GPLv2 or later (libtfmxaudiodecoder is GPLv2+).
-
