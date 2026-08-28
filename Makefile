@@ -3,7 +3,7 @@
 #   /usr/bin/make          # host tests + 32-bit DLL
 #   /usr/bin/make dll      # dist/xmp-tfmx.dll
 #   /usr/bin/make test     # host render/seek/detect tests
-#   /usr/bin/make pack     # /workspace/xmp-tfmx-1.0.2.zip
+#   /usr/bin/make pack     # /workspace/xmp-tfmx-1.0.3.zip
 #
 # If `make` is a wrapper, invoke GNU make explicitly.
 
@@ -117,12 +117,12 @@ $(DIST)/xmp-tfmx.dll: $(SRC)/xmp-tfmx.cpp $(SRC)/xmp-tfmx.def $(OBJW)/tfmx_playe
 	file $@
 
 pack: dll
-	rm -f /workspace/xmp-tfmx-1.0.2.zip
+	rm -f /workspace/xmp-tfmx-1.0.3.zip
 	mkdir -p $(DIST)/pack
 	cp -f $(DIST)/xmp-tfmx.dll $(ROOT)/README.md $(DIST)/pack/
-	cd $(DIST)/pack && zip -9 /workspace/xmp-tfmx-1.0.2.zip xmp-tfmx.dll README.md
+	cd $(DIST)/pack && zip -9 /workspace/xmp-tfmx-1.0.3.zip xmp-tfmx.dll README.md
 	rm -rf $(DIST)/pack
-	ls -l /workspace/xmp-tfmx-1.0.2.zip
+	ls -l /workspace/xmp-tfmx-1.0.3.zip
 
 clean:
 	rm -rf $(DIST)/xmp-tfmx.dll $(DIST)/test_tfmx_render $(DIST)/obj $(DIST)/obj-i686 $(DIST)/pack

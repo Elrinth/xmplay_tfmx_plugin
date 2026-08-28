@@ -1,4 +1,4 @@
-# xmp-tfmx 1.0.2
+# xmp-tfmx 1.0.3
 
 Native **32-bit** XMPlay input plugin for Chris Hülsbeck **TFMX**
 (The Final Musicsystem eXtended).
@@ -20,9 +20,9 @@ Composer `.fc` (those conflict with other XMPlay plugins).
 
 Copy `xmp-tfmx.dll` next to `xmplay.exe` (or into XMPlay's plugin folder)
 and restart XMPlay. The DLL carries a Windows VERSIONINFO resource
-(FILEVERSION 1.0.2.0) so XMPlay can include it in update notifications.
-Classic XMPlay is **32-bit only** — this DLL is PE32 i386. A 64-bit build
-will not load.
+(FILEVERSION 1.0.3.0, PLUGIN_XMPVER 1000300) so XMPlay can include it
+in update notifications. Classic XMPlay is **32-bit only** — this DLL
+is PE32 i386. A 64-bit build will not load.
 
 XMPlay's *Supported file types* list shows **TFMX** with extensions
 `tfx/tfm/mdat/tfmx`.
@@ -43,24 +43,27 @@ merged single-file format (TFMXPAK / TFHD / TFMX-MOD).
 
 ## Length + seek
 
-- Playlist / file-info length comes from `tfmxdec_duration()` when that
-  matches heard audio (dry-run to the first loop / song-end).
-- If the engine reports 0 or a one-note-short time, the plugin measures
+- **One playlist item per file.** `GetFileInfo` returns a single length;
+  `GetSubSongs` returns 1 (never 8). There is no fake NSF split and no
+  Shift+arrow tracks. The title is never `name - 1/8`.
+- Real song-table slots (sustained audio) play **back-to-back** as one
+  stream. Length is the sum of those slots (e.g. 6:46 when eight library
+  slots have audio). A file with one slot stays one stream of that slot.
+- Playlist / file-info length comes from `tfmxdec_duration()` per slot
+  when that matches heard audio (dry-run to the first loop / song-end).
+- If the engine reports 0 or a one-note-short time, that slot is measured
   with loop mode on until 2 seconds of silence, capped at **10 minutes**.
-- Loop-end is not treated as EOF; we play to the measured length.
-- Playhead is seekable (`SetLength(seconds, TRUE)`, granularity 1 ms).
-- Playback uses loop mode so the first pattern loop does not stop the song.
+- Loop-end / `song_end` is not treated as EOF. Process does not return 0
+  until the playhead reaches the advertised total. Decoder errors become
+  silence until that cap — XMPlay is never handed an early end-of-file.
+- Playhead is seekable (`SetLength(seconds, TRUE)`, granularity 1 ms);
+  seek maps into the slot chain.
+- Playback uses loop mode so the first pattern loop does not stop a slot.
+- Open uses the real `.tfx` path (`tfmxdec_set_path`) so the library
+  finds the sibling `.sam` next to it — same as qmmp-tfmx. A temp pair
+  is only written for memory-only opens. Engine is Chris/Hülsbeck
+  `TFMXDecoder`, not Jochen/Hippel.
 
-## Multi-track
-
-The TFMX song table often has 8 slots (one real tune plus SFX). This
-plugin **keeps only slots with sustained audio** (about 2 seconds of
-non-silence). One-note / empty / SFX slots are not NSF tracks.
-
-Remaining songs become NSF-style **tracks**. Use **Shift+Left** /
-**Shift+Right** in XMPlay (same as NSF / xmp-sc68 / xmp-pokey).
-If only one real song remains, the title is a single name — not
-`name - 1/8`.
 
 The displayed title is the module title when it is non-empty and not
 `(Empty)`; otherwise the original filename stem (never a temp `mod.tfx`).
