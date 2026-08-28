@@ -13,3 +13,8 @@ and must **not** be committed or uploaded.
 
 `kanzle/` is used when present. Opening either `.tfx` must find `Set.sam`
 in that folder (not `song.sam` / `smpl.set`). Never commit or upload these.
+
+    tests/samples/longnoise/long.tfx + long.sam   # local only: 3:46 music then junk
+    tests/samples/tiny/tiny.tfx + tiny.sam        # local only: lone sample-loop, 10 min cap
+
+`longnoise/` and `tiny/` are used when present. Never commit or upload these.
