@@ -1,0 +1,14 @@
+dist/
+*.o
+*.a
+*.dll
+*.exe
+*.zip
+tests/samples/user-song.*
+tests/samples/*.tfx
+tests/samples/*.sam
+tests/samples/*.smpl
+tests/samples/*.tfm
+tests/samples/*.tfmx
+tests/samples/*.mdat
+
